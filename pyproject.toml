@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "quip-to-outline"
+version = "1.0.0"
+description = "Direct migration from Quip to self-hosted Outline wiki"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [
+    { name = "Egor Vasilev" },
+]
+keywords = ["quip", "outline", "migration", "wiki"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Systems Administration",
+]
+dependencies = [
+    "psycopg2-binary>=2.9",
+]
+
+[project.scripts]
+quip-to-outline = "quip_to_outline.cli:cli_main"
+
+[project.urls]
+Repository = "https://github.com/egorvas/quip-to-outline"

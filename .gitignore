@@ -1,0 +1,9 @@
+config.json
+state.json
+author_mapping.json
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.venv/
