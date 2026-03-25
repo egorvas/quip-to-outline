@@ -66,8 +66,17 @@ def transliterate(text):
 
 # --- Config & State ---
 
-WORK_DIR = os.getcwd()
-CONFIG_FILE = os.path.join(WORK_DIR, "config.json")
+def _resolve_work_dir():
+    """Determine working directory from --config arg or cwd."""
+    for i, arg in enumerate(sys.argv):
+        if arg.lower() == "--config" and i + 1 < len(sys.argv):
+            config_path = os.path.abspath(sys.argv[i + 1])
+            return os.path.dirname(config_path), config_path
+    cwd = os.getcwd()
+    return cwd, os.path.join(cwd, "config.json")
+
+
+WORK_DIR, CONFIG_FILE = _resolve_work_dir()
 STATE_FILE = os.path.join(WORK_DIR, "state.json")
 MAPPING_FILE = os.path.join(WORK_DIR, "author_mapping.json")
 
@@ -1318,6 +1327,8 @@ Commands:
   --help              Show this help
 
 Options:
+  --config PATH       Path to config.json (default: ./config.json)
+                      All files (state, mapping) stored next to config
   --noComments        Skip comment migration
   --noPermissions     Skip permission sync (collection access)
   --noAttachments     Skip image/file downloads (text only)
@@ -1335,9 +1346,10 @@ Workflow:
   3. quip-to-outline [options]
 
 Examples:
-  quip-to-outline                          Full migration
-  quip-to-outline --noAttachments          Text only, no images
-  quip-to-outline --noUsers --noComments   Minimal: docs only, no users/comments
+  quip-to-outline                                    Full migration
+  quip-to-outline --config ~/migration/config.json   Custom config path
+  quip-to-outline --noAttachments                    Text only, no images
+  quip-to-outline --noUsers --noComments             Minimal: docs only
 
 Resume: safe to re-run, skips already imported documents (state.json).
 """)
