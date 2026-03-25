@@ -1796,7 +1796,11 @@ def _delete_via_db(doc_ids, collection_ids):
 
 
 def cmd_cleanup():
-    """Delete everything created by this script from Outline."""
+    """Delete everything created by this script from Outline via DB."""
+    if not DB_ENABLED:
+        print("Error: --cleanup requires database configuration (db_host in config.json).")
+        sys.exit(1)
+
     state = load_state()
     imported = state.get("imported_threads", {})
     collections = state.get("collections", {})
@@ -1805,46 +1809,19 @@ def cmd_cleanup():
         print("Nothing to clean up (state is empty).")
         return
 
-    print(f"This will delete from Outline:")
-    print(f"  {len(imported)} documents (with their comments)")
-    print(f"  {len(state.get('folder_docs', {}))} folder docs")
-    print(f"  {len(collections)} collections")
+    all_doc_ids = [info["doc_id"] for info in imported.values() if info.get("doc_id")]
+    all_doc_ids += list(state.get("folder_docs", {}).values())
+    all_coll_ids = list(collections.values())
+
+    print(f"This will delete from Outline (via DB):")
+    print(f"  {len(all_doc_ids)} documents (with comments, revisions, etc.)")
+    print(f"  {len(all_coll_ids)} collections")
     resp = input("\nProceed? (yes/no): ").strip().lower()
     if resp not in ("yes", "y"):
         print("Aborted.")
         return
 
-    # Collect all doc IDs
-    all_doc_ids = [info["doc_id"] for info in imported.values() if info.get("doc_id")]
-    all_doc_ids += list(state.get("folder_docs", {}).values())
-
-    # Try API first
-    deleted_docs = 0
-    failed_doc_ids = []
-    for doc_id in all_doc_ids:
-        try:
-            outline_post("documents.delete", {"id": doc_id, "permanent": True})
-            deleted_docs += 1
-        except Exception:
-            failed_doc_ids.append(doc_id)
-
-    deleted_colls = 0
-    failed_coll_ids = []
-    for fid, coll_id in collections.items():
-        try:
-            outline_post("collections.delete", {"id": coll_id})
-            deleted_colls += 1
-        except Exception:
-            failed_coll_ids.append(coll_id)
-
-    # Fallback to DB for 403 failures
-    if failed_doc_ids or failed_coll_ids:
-        print(f"  API: {deleted_docs} docs, {deleted_colls} collections deleted")
-        print(f"  API failed: {len(failed_doc_ids)} docs, {len(failed_coll_ids)} collections (trying DB...)")
-        db_docs, db_colls = _delete_via_db(failed_doc_ids, failed_coll_ids)
-        deleted_docs += db_docs
-        deleted_colls += db_colls
-
+    deleted_docs, deleted_colls = _delete_via_db(all_doc_ids, all_coll_ids)
     print(f"\n  Deleted {deleted_docs} documents, {deleted_colls} collections")
 
     # Reset state but keep cache
@@ -1857,6 +1834,9 @@ def cmd_cleanup():
 
 def cmd_remove():
     """Remove specific folders from Outline and state. Requires --folders or --noFolders."""
+    if not DB_ENABLED:
+        print("Error: --remove requires database configuration (db_host in config.json).")
+        sys.exit(1)
     if not OPT_FOLDERS and not OPT_NO_FOLDERS:
         print("Error: --remove requires --folders or --noFolders to specify what to remove.")
         sys.exit(1)
@@ -1908,37 +1888,19 @@ def cmd_remove():
         print("Aborted.")
         return
 
-    # Delete documents from Outline (API first, DB fallback)
-    deleted = 0
-    failed_ids = []
-    for tid, info in docs_to_delete.items():
-        doc_id = info.get("doc_id")
-        if not doc_id:
-            continue
-        try:
-            outline_post("documents.delete", {"id": doc_id, "permanent": True})
-            deleted += 1
-        except Exception:
-            failed_ids.append(doc_id)
+    # Collect all doc IDs to delete
+    all_doc_ids = [info["doc_id"] for info in docs_to_delete.values() if info.get("doc_id")]
 
-    # Delete folder docs
-    folder_docs_deleted = 0
     folder_docs = state.get("folder_docs", {})
     keys_to_remove = []
     for key, doc_id in folder_docs.items():
         folder_id = key.split(":")[-1] if ":" in key else ""
         if folder_id and folder_id in {fid for space in target.values() for fid in space["subfolders"]}:
-            try:
-                outline_post("documents.delete", {"id": doc_id, "permanent": True})
-                folder_docs_deleted += 1
-            except Exception:
-                failed_ids.append(doc_id)
+            all_doc_ids.append(doc_id)
             keys_to_remove.append(key)
 
-    # DB fallback for 403 failures
-    if failed_ids:
-        db_docs, _ = _delete_via_db(failed_ids, [])
-        deleted += db_docs
+    # Delete via DB
+    deleted, _ = _delete_via_db(all_doc_ids, [])
 
     # Update state — remove deleted threads and folder docs
     for tid in docs_to_delete:
