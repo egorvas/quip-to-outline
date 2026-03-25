@@ -701,23 +701,10 @@ class Progress:
         self.errors = 0
         self.start_time = time.monotonic()
 
-    def _eta(self):
-        elapsed = time.monotonic() - self.start_time
-        processed = self.done + self.skipped + self.errors
-        if processed == 0 or elapsed < 1:
-            return ""
-        rate = processed / elapsed
-        remaining = (self.total - processed) / rate
-        if remaining < 60:
-            return f"~{remaining:.0f}s left"
-        return f"~{remaining / 60:.0f}m left"
-
     def _prefix(self):
         processed = self.done + self.skipped + self.errors
         pct = processed * 100 // self.total if self.total else 0
-        eta = self._eta()
-        eta_str = f" {eta}" if eta else ""
-        return f"[{processed}/{self.total} {pct}%{eta_str}]"
+        return f"[{processed}/{self.total} {pct}%]"
 
     def log_imported(self, title, extras=""):
         self.done += 1
