@@ -1042,16 +1042,15 @@ def update_db(state, thread_meta_map, user_names, author_mapping):
     if not OPT_NO_USERS:
         for tid, info in state["imported_threads"].items():
             for cdata in info.get("comments", []):
-                comment_id = cdata["comment_id"]
+                comment_id = cdata.get("comment_id")
+                if not comment_id:
+                    continue
                 created_usec = cdata.get("created_usec")
-                author_qid = cdata.get("author_id")
-
-                if created_usec:
-                    created_at = datetime.fromtimestamp(created_usec / 1e6, tz=timezone.utc)
-                else:
+                if not created_usec:
                     continue
 
-                # Resolve comment author
+                created_at = datetime.fromtimestamp(created_usec / 1e6, tz=timezone.utc)
+                author_qid = cdata.get("author_id")
                 author_name = user_names.get(author_qid)
                 outline_user_id = author_mapping.get(author_name) if author_name else None
 
@@ -1059,13 +1058,13 @@ def update_db(state, thread_meta_map, user_names, author_mapping):
                     cur.execute(
                         'UPDATE comments SET "createdAt" = %s, "createdById" = %s::uuid WHERE id = %s::uuid',
                         (created_at, outline_user_id, comment_id),
-                )
-            else:
-                cur.execute(
-                    'UPDATE comments SET "createdAt" = %s WHERE id = %s::uuid',
-                    (created_at, comment_id),
-                )
-            comment_updated += 1
+                    )
+                else:
+                    cur.execute(
+                        'UPDATE comments SET "createdAt" = %s WHERE id = %s::uuid',
+                        (created_at, comment_id),
+                    )
+                comment_updated += 1
 
     conn.commit()
     conn.close()
