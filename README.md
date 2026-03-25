@@ -120,7 +120,10 @@ quip-to-outline [options]
 | `--noUsers` | Skip user creation. Implies `--noPermissions`. All content attributed to admin. |
 | `--noPermissions` | Skip permission sync. Collections accessible to everyone. |
 | `--folders a,b,c` | Only migrate specified folders (comma-separated names). |
+| `--noFolders a,b,c` | Exclude specified folders from migration. |
 | `--resetCache` | Clear cached Quip data, re-fetch from API. Import progress is preserved. |
+
+Using `--folders` and `--noFolders` together is allowed, but the same folder in both is an error.
 
 When `--noUsers` is set but comments are enabled, comments include the original author name and timestamp in the text:
 

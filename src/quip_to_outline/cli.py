@@ -99,7 +99,8 @@ OPT_NO_COMMENTS = False
 OPT_NO_PERMISSIONS = False
 OPT_NO_ATTACHMENTS = False
 OPT_NO_USERS = False
-OPT_FOLDERS = None  # None = all, or set of folder names to include
+OPT_FOLDERS = None      # None = all, or set of folder names to include
+OPT_NO_FOLDERS = None   # None = none excluded, or set of folder names to exclude
 
 
 def load_config():
@@ -1154,6 +1155,37 @@ def _folder_matches(node, names_lower):
     return False
 
 
+def exclude_spaces(spaces, folder_names):
+    """Remove matching folders from the tree. Inverse of filter_spaces."""
+    names_lower = {n.lower() for n in folder_names}
+    filtered = {}
+
+    for fid, space in spaces.items():
+        if space["title"].lower() in names_lower:
+            continue
+
+        # Remove matching subfolders
+        kept_subfolders = {
+            sub_fid: sub_node
+            for sub_fid, sub_node in space["subfolders"].items()
+            if not _folder_matches(sub_node, names_lower)
+        }
+
+        filtered[fid] = {**space, "subfolders": kept_subfolders}
+
+    # Print what was excluded
+    def count_threads(node):
+        n = len(node["thread_ids"])
+        for sub in node["subfolders"].values():
+            n += count_threads(sub)
+        return n
+
+    total = sum(count_threads(s) for s in filtered.values())
+    print(f"  After exclusion: {total} threads remaining")
+
+    return filtered
+
+
 # --- Main ---
 
 def main():
@@ -1169,11 +1201,16 @@ def main():
         print("No folders found.")
         return
 
-    # Apply --folders filter (on cached full tree)
+    # Apply --folders / --noFolders filters (on cached full tree)
     if OPT_FOLDERS:
         spaces = filter_spaces(spaces, OPT_FOLDERS)
         if not spaces:
             print(f"No folders matched: {', '.join(OPT_FOLDERS)}")
+            return
+    if OPT_NO_FOLDERS:
+        spaces = exclude_spaces(spaces, OPT_NO_FOLDERS)
+        if not spaces:
+            print("All folders excluded.")
             return
 
     # Phase 2: Fetch thread data (metadata + HTML in one pass)
@@ -1289,7 +1326,8 @@ Options:
   --resetCache        Clear cached Quip data, re-fetch everything
                       Import progress (already imported docs) is preserved
   --folders a,b,c     Only migrate specified folders (comma-separated names)
-                      Full tree is cached; filter applied at runtime
+  --noFolders a,b,c   Exclude specified folders from migration
+                      Filters applied on cached tree; no extra API calls
 
 Workflow:
   1. quip-to-outline --init
@@ -1306,7 +1344,8 @@ Resume: safe to re-run, skips already imported documents (state.json).
 
 
 def parse_flags():
-    global OPT_NO_COMMENTS, OPT_NO_PERMISSIONS, OPT_NO_ATTACHMENTS, OPT_NO_USERS, OPT_FOLDERS
+    global OPT_NO_COMMENTS, OPT_NO_PERMISSIONS, OPT_NO_ATTACHMENTS, OPT_NO_USERS
+    global OPT_FOLDERS, OPT_NO_FOLDERS
     args_lower = [a.lower() for a in sys.argv]
     OPT_NO_COMMENTS = "--nocomments" in args_lower
     OPT_NO_PERMISSIONS = "--nopermissions" in args_lower
@@ -1322,6 +1361,20 @@ def parse_flags():
             OPT_FOLDERS = set(names)
             break
 
+    # --noFolders name1,name2,name3
+    for i, arg in enumerate(sys.argv):
+        if arg.lower() == "--nofolders" and i + 1 < len(sys.argv):
+            names = [n.strip() for n in sys.argv[i + 1].split(",") if n.strip()]
+            OPT_NO_FOLDERS = set(names)
+            break
+
+    # Validate: same folder in both is an error
+    if OPT_FOLDERS and OPT_NO_FOLDERS:
+        overlap = OPT_FOLDERS & OPT_NO_FOLDERS
+        if overlap:
+            print(f"Error: folders in both --folders and --noFolders: {', '.join(sorted(overlap))}")
+            sys.exit(1)
+
     # --resetCache: clear cached Quip data, keep import progress
     if "--resetcache" in args_lower:
         if os.path.exists(STATE_FILE):
@@ -1336,6 +1389,7 @@ def parse_flags():
     if OPT_NO_ATTACHMENTS:  flags.append("noAttachments")
     if OPT_NO_USERS:        flags.append("noUsers")
     if OPT_FOLDERS:          flags.append(f"folders: {','.join(sorted(OPT_FOLDERS))}")
+    if OPT_NO_FOLDERS:       flags.append(f"noFolders: {','.join(sorted(OPT_NO_FOLDERS))}")
     if flags:
         print(f"Mode: {', '.join(flags)}")
 
