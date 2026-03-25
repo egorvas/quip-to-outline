@@ -1762,8 +1762,39 @@ def cmd_cleanup():
     print(f"  State reset (cache preserved)")
 
 
+KNOWN_ARGS = {
+    "--help", "-h", "--init", "--list", "--status", "--dryrun", "--verify",
+    "--retry", "--cleanup", "--config", "--nocomments", "--nopermissions",
+    "--noattachments", "--nousers", "--resetcache", "--resettree",
+    "--folders", "--nofolders",
+}
+
+# Args that take a value after them
+ARGS_WITH_VALUE = {"--config", "--folders", "--nofolders"}
+
+
+def validate_args():
+    """Check for unknown arguments."""
+    skip_next = False
+    unknown = []
+    for arg in sys.argv[1:]:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg.lower() in ARGS_WITH_VALUE:
+            skip_next = True
+            continue
+        if arg.startswith("--") and arg.lower() not in KNOWN_ARGS:
+            unknown.append(arg)
+    if unknown:
+        print(f"Error: unknown argument(s): {', '.join(unknown)}")
+        print(f"Run: quip-to-outline --help")
+        sys.exit(1)
+
+
 def cli_main():
     """Entry point for the CLI."""
+    validate_args()
     args_lower = [a.lower() for a in sys.argv]
 
     if "--help" in args_lower or "-h" in args_lower:
