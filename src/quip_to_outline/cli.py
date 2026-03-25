@@ -1364,7 +1364,8 @@ Options:
   --noPermissions     Skip permission sync (collection access)
   --noAttachments     Skip image/file downloads (text only)
   --noUsers           Skip user creation (implies --noPermissions)
-  --resetCache        Clear cached Quip data, re-fetch everything
+  --resetTree         Clear folder tree cache only, re-walk Quip folders
+  --resetCache        Clear all cached Quip data, re-fetch everything
   --folders a,b,c     Only migrate specified folders
   --noFolders a,b,c   Exclude specified folders
 
@@ -1411,13 +1412,29 @@ def parse_flags():
             print(f"Error: folders in both --folders and --noFolders: {', '.join(sorted(overlap))}")
             sys.exit(1)
 
-    # --resetCache: clear cached Quip data, keep import progress
+    # --resetTree: clear only folder tree cache
+    if "--resettree" in args_lower:
+        resp = input("Reset folder tree cache? Thread data and import progress will be kept. (y/n): ").strip().lower()
+        if resp in ("y", "yes") and os.path.exists(STATE_FILE):
+            state = load_state()
+            state.setdefault("cache", {})["spaces"] = None
+            save_state(state)
+            print("Folder tree cache cleared")
+        else:
+            print("Aborted.")
+            sys.exit(0)
+
+    # --resetCache: clear all cached Quip data, keep import progress
     if "--resetcache" in args_lower:
-        if os.path.exists(STATE_FILE):
+        resp = input("Reset ALL Quip cache? Import progress will be kept. (y/n): ").strip().lower()
+        if resp in ("y", "yes") and os.path.exists(STATE_FILE):
             state = load_state()
             state["cache"] = {"spaces": None, "thread_data": None, "user_names": None}
             save_state(state)
-        print("Cache cleared (import progress preserved)")
+            print("All cache cleared")
+        else:
+            print("Aborted.")
+            sys.exit(0)
 
     flags = []
     if OPT_NO_COMMENTS:     flags.append("noComments")
