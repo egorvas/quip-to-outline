@@ -1378,6 +1378,7 @@ Commands:
   --verify            Compare Quip vs Outline, report mismatches
   --retry             Re-import only previously failed documents
   --cleanup           Delete everything created by this script
+  --remove            Remove specific folders (use with --folders/--noFolders)
   --help              Show this help
 
 Options:
@@ -1399,6 +1400,7 @@ Examples:
   quip-to-outline --verify                           Check results
   quip-to-outline --retry                            Retry failed docs
   quip-to-outline --cleanup                          Remove everything from Outline
+  quip-to-outline --remove --folders Archive          Remove specific folders
 """)
 
 
@@ -1784,9 +1786,110 @@ def cmd_cleanup():
     print(f"  State reset (cache preserved)")
 
 
+def cmd_remove():
+    """Remove specific folders from Outline and state. Requires --folders or --noFolders."""
+    if not OPT_FOLDERS and not OPT_NO_FOLDERS:
+        print("Error: --remove requires --folders or --noFolders to specify what to remove.")
+        sys.exit(1)
+
+    state = load_state()
+    cache = state.get("cache", {})
+    spaces = cache.get("spaces")
+    if not spaces:
+        print("No cached folder tree. Run migration first or use --list.")
+        return
+
+    # Apply filters to get target folders
+    if OPT_FOLDERS:
+        target = filter_spaces(spaces, OPT_FOLDERS)
+    else:
+        # --noFolders means remove everything EXCEPT those — so invert:
+        # target = full tree minus what we want to keep
+        kept = exclude_spaces(spaces, OPT_NO_FOLDERS)
+        # target = what was excluded
+        target = filter_spaces(spaces, OPT_NO_FOLDERS)
+
+    if not target:
+        print("No folders matched.")
+        return
+
+    # Collect thread IDs to remove
+    target_thread_ids = set()
+    target_folder_names = set()
+    def collect(node):
+        target_thread_ids.update(node["thread_ids"])
+        target_folder_names.add(node["title"])
+        for sub in node["subfolders"].values():
+            collect(sub)
+    for space in target.values():
+        collect(space)
+
+    # Count what will be deleted
+    imported = state.get("imported_threads", {})
+    docs_to_delete = {tid: info for tid, info in imported.items() if tid in target_thread_ids}
+    comments_count = sum(len(info.get("comments", [])) for info in docs_to_delete.values())
+
+    print(f"\nWill remove from Outline:")
+    print(f"  Folders: {', '.join(sorted(target_folder_names))}")
+    print(f"  Documents: {len(docs_to_delete)}")
+    print(f"  Comments: {comments_count}")
+
+    resp = input("\nProceed? (y/n): ").strip().lower()
+    if resp not in ("y", "yes"):
+        print("Aborted.")
+        return
+
+    # Delete documents from Outline
+    deleted = 0
+    for tid, info in docs_to_delete.items():
+        doc_id = info.get("doc_id")
+        if not doc_id:
+            continue
+        try:
+            outline_post("documents.delete", {"id": doc_id, "permanent": True})
+            deleted += 1
+        except Exception:
+            pass
+
+    # Delete folder docs
+    folder_docs_deleted = 0
+    folder_docs = state.get("folder_docs", {})
+    keys_to_remove = []
+    for key, doc_id in folder_docs.items():
+        # key format: "collection_id:folder_id"
+        folder_id = key.split(":")[-1] if ":" in key else ""
+        # Check if this folder_id is in our target tree
+        if folder_id and folder_id in {fid for space in target.values() for fid in space["subfolders"]}:
+            try:
+                outline_post("documents.delete", {"id": doc_id, "permanent": True})
+                folder_docs_deleted += 1
+            except Exception:
+                pass
+            keys_to_remove.append(key)
+
+    # Update state — remove deleted threads and folder docs
+    for tid in docs_to_delete:
+        state["imported_threads"].pop(tid, None)
+    for key in keys_to_remove:
+        state["folder_docs"].pop(key, None)
+
+    # Remove from thread_data cache
+    thread_cache = cache.get("thread_data") or {}
+    for tid in target_thread_ids:
+        thread_cache.pop(tid, None)
+    cache["thread_data"] = thread_cache
+
+    # Clear folder tree cache so it gets re-walked
+    cache["spaces"] = None
+
+    save_state(state)
+    print(f"\n  Deleted {deleted} documents, {folder_docs_deleted} folder docs")
+    print(f"  State updated, folder tree cache cleared")
+
+
 KNOWN_ARGS = {
     "--help", "-h", "--init", "--list", "--status", "--dryrun", "--verify",
-    "--retry", "--cleanup", "--config", "--nocomments", "--nopermissions",
+    "--retry", "--cleanup", "--remove", "--config", "--nocomments", "--nopermissions",
     "--noattachments", "--nousers", "--resetcache", "--resettree",
     "--folders", "--nofolders",
 }
@@ -1847,6 +1950,11 @@ def cli_main():
         cfg = load_config()
         setup_globals(cfg)
         cmd_cleanup()
+    elif "--remove" in args_lower:
+        cfg = load_config()
+        setup_globals(cfg)
+        parse_flags()
+        cmd_remove()
     else:
         cfg = load_config()
         setup_globals(cfg)
