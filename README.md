@@ -24,20 +24,19 @@ Direct migration from Quip to self-hosted Outline wiki via API. No intermediate 
 ## Installation
 
 ```bash
-pip install quip-to-outline
+pip install git+https://github.com/egorvas/quip-to-outline.git
 ```
 
 With database support (for timestamp/author updates in Outline DB):
 
 ```bash
-pip install quip-to-outline[db]
+pip install "quip-to-outline[db] @ git+https://github.com/egorvas/quip-to-outline.git"
 ```
 
 Or with pipx:
 
 ```bash
-pipx install quip-to-outline
-pipx install quip-to-outline[db]   # with DB support
+pipx install git+https://github.com/egorvas/quip-to-outline.git
 ```
 
 **Recommended:** Disable Outline rate limiting before import. Add to your Outline environment:
