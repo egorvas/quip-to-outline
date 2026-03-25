@@ -215,7 +215,7 @@ class QuipRateLimiter:
             if self.remaining <= 1 or self.company_remaining <= 1:
                 wait = self.reset_time - now
                 if wait > 0:
-                    print(f"\r      Rate limit: waiting {wait:.0f}s for reset...", end="", flush=True)
+                    print(f"      Rate limit: waiting {wait:.0f}s for reset...")
                     time.sleep(wait + 0.5)
                 self.remaining = 50
                 self.company_remaining = 600
@@ -279,7 +279,7 @@ def quip_get(endpoint, retries=5):
         except urllib.error.HTTPError as e:
             if e.code in (429, 503) and attempt < retries - 1:
                 wait = _quip_limiter.on_throttle(e.headers)
-                print(f"\r      Quip {e.code}, waiting {wait:.0f}s (remaining: user={_quip_limiter.remaining}, company={_quip_limiter.company_remaining})...", flush=True)
+                print(f"      Quip {e.code}, waiting {wait:.0f}s...")
                 time.sleep(wait)
             else:
                 raise
