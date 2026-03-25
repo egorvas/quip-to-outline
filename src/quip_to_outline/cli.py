@@ -1761,6 +1761,40 @@ def cmd_retry():
     main()
 
 
+def _delete_via_db(doc_ids, collection_ids):
+    """Fallback: delete documents and collections directly via DB."""
+    if not DB_ENABLED:
+        print("  Warning: API delete failed and no DB configured. Some items may remain.")
+        return 0, 0
+    conn = psycopg2.connect(**DB_CONFIG)
+    cur = conn.cursor()
+    docs_deleted = 0
+    for doc_id in doc_ids:
+        try:
+            cur.execute('DELETE FROM comments WHERE "documentId" = %s::uuid', (doc_id,))
+            cur.execute('DELETE FROM revisions WHERE "documentId" = %s::uuid', (doc_id,))
+            cur.execute('DELETE FROM events WHERE "documentId" = %s::uuid', (doc_id,))
+            cur.execute('DELETE FROM subscriptions WHERE "documentId" = %s::uuid', (doc_id,))
+            cur.execute('DELETE FROM views WHERE "documentId" = %s::uuid', (doc_id,))
+            cur.execute('DELETE FROM documents WHERE id = %s::uuid', (doc_id,))
+            docs_deleted += 1
+        except Exception:
+            conn.rollback()
+    colls_deleted = 0
+    for coll_id in collection_ids:
+        try:
+            cur.execute('DELETE FROM collection_users WHERE "collectionId" = %s::uuid', (coll_id,))
+            cur.execute('DELETE FROM subscriptions WHERE "collectionId" = %s::uuid', (coll_id,))
+            cur.execute('DELETE FROM events WHERE "collectionId" = %s::uuid', (coll_id,))
+            cur.execute('DELETE FROM collections WHERE id = %s::uuid', (coll_id,))
+            colls_deleted += 1
+        except Exception:
+            conn.rollback()
+    conn.commit()
+    conn.close()
+    return docs_deleted, colls_deleted
+
+
 def cmd_cleanup():
     """Delete everything created by this script from Outline."""
     state = load_state()
@@ -1773,39 +1807,43 @@ def cmd_cleanup():
 
     print(f"This will delete from Outline:")
     print(f"  {len(imported)} documents (with their comments)")
+    print(f"  {len(state.get('folder_docs', {}))} folder docs")
     print(f"  {len(collections)} collections")
     resp = input("\nProceed? (yes/no): ").strip().lower()
     if resp not in ("yes", "y"):
         print("Aborted.")
         return
 
-    # Delete documents (this also deletes their comments)
+    # Collect all doc IDs
+    all_doc_ids = [info["doc_id"] for info in imported.values() if info.get("doc_id")]
+    all_doc_ids += list(state.get("folder_docs", {}).values())
+
+    # Try API first
     deleted_docs = 0
-    for tid, info in imported.items():
-        doc_id = info.get("doc_id")
-        if not doc_id:
-            continue
+    failed_doc_ids = []
+    for doc_id in all_doc_ids:
         try:
             outline_post("documents.delete", {"id": doc_id, "permanent": True})
             deleted_docs += 1
         except Exception:
-            pass
+            failed_doc_ids.append(doc_id)
 
-    # Delete folder docs
-    for key, doc_id in state.get("folder_docs", {}).items():
-        try:
-            outline_post("documents.delete", {"id": doc_id, "permanent": True})
-        except Exception:
-            pass
-
-    # Delete collections
     deleted_colls = 0
+    failed_coll_ids = []
     for fid, coll_id in collections.items():
         try:
             outline_post("collections.delete", {"id": coll_id})
             deleted_colls += 1
         except Exception:
-            pass
+            failed_coll_ids.append(coll_id)
+
+    # Fallback to DB for 403 failures
+    if failed_doc_ids or failed_coll_ids:
+        print(f"  API: {deleted_docs} docs, {deleted_colls} collections deleted")
+        print(f"  API failed: {len(failed_doc_ids)} docs, {len(failed_coll_ids)} collections (trying DB...)")
+        db_docs, db_colls = _delete_via_db(failed_doc_ids, failed_coll_ids)
+        deleted_docs += db_docs
+        deleted_colls += db_colls
 
     print(f"\n  Deleted {deleted_docs} documents, {deleted_colls} collections")
 
@@ -1870,8 +1908,9 @@ def cmd_remove():
         print("Aborted.")
         return
 
-    # Delete documents from Outline
+    # Delete documents from Outline (API first, DB fallback)
     deleted = 0
+    failed_ids = []
     for tid, info in docs_to_delete.items():
         doc_id = info.get("doc_id")
         if not doc_id:
@@ -1880,23 +1919,26 @@ def cmd_remove():
             outline_post("documents.delete", {"id": doc_id, "permanent": True})
             deleted += 1
         except Exception:
-            pass
+            failed_ids.append(doc_id)
 
     # Delete folder docs
     folder_docs_deleted = 0
     folder_docs = state.get("folder_docs", {})
     keys_to_remove = []
     for key, doc_id in folder_docs.items():
-        # key format: "collection_id:folder_id"
         folder_id = key.split(":")[-1] if ":" in key else ""
-        # Check if this folder_id is in our target tree
         if folder_id and folder_id in {fid for space in target.values() for fid in space["subfolders"]}:
             try:
                 outline_post("documents.delete", {"id": doc_id, "permanent": True})
                 folder_docs_deleted += 1
             except Exception:
-                pass
+                failed_ids.append(doc_id)
             keys_to_remove.append(key)
+
+    # DB fallback for 403 failures
+    if failed_ids:
+        db_docs, _ = _delete_via_db(failed_ids, [])
+        deleted += db_docs
 
     # Update state — remove deleted threads and folder docs
     for tid in docs_to_delete:
