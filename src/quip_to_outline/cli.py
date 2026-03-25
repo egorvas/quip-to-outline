@@ -1320,20 +1320,31 @@ def main():
         if not OPT_NO_PERMISSIONS:
             owner = space.get("owner")
             if owner:
-                # Personal folder — grant access only to owner
+                # Personal folder — grant access to owner + keep admin
                 outline_uid = author_mapping.get(owner)
                 if outline_uid:
                     try:
                         outline_post("collections.add_user", {
                             "id": coll_id, "userId": outline_uid, "permission": "read_write",
                         })
-                        print(f"  Permissions: personal ({owner})")
                     except Exception:
                         pass
+                print(f"  Permissions: personal ({owner})")
             else:
                 granted = sync_collection_permissions(coll_id, space, user_names, author_mapping)
                 if granted:
                     print(f"  Permissions: {granted} users granted access")
+
+            # Always ensure the API token user (admin) has admin access
+            try:
+                me = outline_post("auth.info")
+                admin_uid = me.get("data", {}).get("user", {}).get("id")
+                if admin_uid:
+                    outline_post("collections.add_user", {
+                        "id": coll_id, "userId": admin_uid, "permission": "admin",
+                    })
+            except Exception:
+                pass
 
         # Import top-level threads (directly in space, no parent folder)
         for tid in space["thread_ids"]:
