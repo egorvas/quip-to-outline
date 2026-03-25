@@ -1293,7 +1293,12 @@ def main():
         # Create or reuse collection
         if fid in state["collections"]:
             coll_id = state["collections"][fid]
-            print(f"  Reusing collection: {coll_id}")
+            # Update collection name if it changed (e.g. personal folder rename)
+            try:
+                outline_post("collections.update", {"id": coll_id, "name": space_name})
+            except Exception:
+                pass
+            print(f"  Reusing collection: {space_name}")
         else:
             result = outline_post("collections.create", {
                 "name": space_name,
