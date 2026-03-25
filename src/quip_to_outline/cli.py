@@ -37,9 +37,9 @@ from datetime import datetime, timezone
 
 try:
     import psycopg2
+    HAS_PSYCOPG2 = True
 except ImportError:
-    print("Error: psycopg2 required. Install: pip install psycopg2-binary")
-    sys.exit(1)
+    HAS_PSYCOPG2 = False
 
 # --- Transliteration ---
 
@@ -75,13 +75,14 @@ CONFIG_TEMPLATE = {
     "outline_url": "http://localhost:3000",
     "outline_api_token": "",
     "quip_api_token": "",
-    "db_host": "localhost",
+    "quip_concurrency": 5,
+    "blob_concurrency": 8,
+    "_comment": "Database is optional. Remove this line and fill db fields to enable timestamp/author updates.",
+    "db_host": "",
     "db_port": 5432,
     "db_user": "outline",
     "db_password": "",
     "db_name": "outline",
-    "quip_concurrency": 5,
-    "blob_concurrency": 8,
 }
 
 # Globals set by setup_globals()
@@ -89,6 +90,7 @@ OUTLINE_URL = ""
 OUTLINE_TOKEN = ""
 QUIP_TOKEN = ""
 DB_CONFIG = {}
+DB_ENABLED = False
 QUIP_CONCURRENCY = 5
 BLOB_CONCURRENCY = 8
 
@@ -106,7 +108,7 @@ def load_config():
         sys.exit(1)
     with open(CONFIG_FILE) as f:
         cfg = json.load(f)
-    required = ["outline_url", "outline_api_token", "quip_api_token", "db_password"]
+    required = ["outline_url", "outline_api_token", "quip_api_token"]
     missing = [k for k in required if not cfg.get(k)]
     if missing:
         print(f"Error: missing config fields: {', '.join(missing)}")
@@ -115,19 +117,30 @@ def load_config():
 
 
 def setup_globals(cfg):
-    global OUTLINE_URL, OUTLINE_TOKEN, QUIP_TOKEN, DB_CONFIG, QUIP_CONCURRENCY, BLOB_CONCURRENCY
+    global OUTLINE_URL, OUTLINE_TOKEN, QUIP_TOKEN, DB_CONFIG, DB_ENABLED, QUIP_CONCURRENCY, BLOB_CONCURRENCY
     OUTLINE_URL = cfg["outline_url"].rstrip("/")
     OUTLINE_TOKEN = cfg["outline_api_token"]
     QUIP_TOKEN = cfg["quip_api_token"]
-    DB_CONFIG = {
-        "host": cfg.get("db_host", "localhost"),
-        "port": int(cfg.get("db_port", 5432)),
-        "user": cfg.get("db_user", "outline"),
-        "password": cfg["db_password"],
-        "dbname": cfg.get("db_name", "outline"),
-    }
     QUIP_CONCURRENCY = cfg.get("quip_concurrency", 5)
     BLOB_CONCURRENCY = cfg.get("blob_concurrency", 8)
+
+    # DB is optional — enabled only if db_password is set and psycopg2 available
+    if cfg.get("db_password"):
+        if not HAS_PSYCOPG2:
+            print("Warning: db configured but psycopg2 not installed. DB features disabled.")
+            print("  Install: pip install psycopg2-binary")
+            DB_ENABLED = False
+        else:
+            DB_CONFIG = {
+                "host": cfg.get("db_host", "localhost"),
+                "port": int(cfg.get("db_port", 5432)),
+                "user": cfg.get("db_user", "outline"),
+                "password": cfg["db_password"],
+                "dbname": cfg.get("db_name", "outline"),
+            }
+            DB_ENABLED = True
+    else:
+        DB_ENABLED = False
 
 
 def init_config():
@@ -630,15 +643,16 @@ def create_author_mapping(user_names):
                 "invites": [{"email": email, "name": name, "role": "member"}],
             })
             new_id = result["data"]["users"][0]["id"]
-            # Activate user
-            try:
-                conn = psycopg2.connect(**DB_CONFIG)
-                cur = conn.cursor()
-                cur.execute('UPDATE users SET "lastActiveAt" = "createdAt" WHERE id = %s::uuid', (new_id,))
-                conn.commit()
-                conn.close()
-            except Exception:
-                pass
+            # Activate user so they appear in Outline admin UI
+            if DB_ENABLED:
+                try:
+                    conn = psycopg2.connect(**DB_CONFIG)
+                    cur = conn.cursor()
+                    cur.execute('UPDATE users SET "lastActiveAt" = "createdAt" WHERE id = %s::uuid', (new_id,))
+                    conn.commit()
+                    conn.close()
+                except Exception:
+                    pass
             mapping[name] = new_id
             outline_users[name.lower()] = (new_id, name, email)
             created += 1
@@ -997,6 +1011,10 @@ def sync_collection_permissions(collection_id, folder_node, user_names, author_m
 
 def update_db(state, thread_meta_map, user_names, author_mapping):
     """Update timestamps and authors in Outline DB."""
+    if not DB_ENABLED:
+        print("\n  Skipping DB update (no database configured)")
+        return
+
     print("\n" + "=" * 50)
     print("Phase 5: Updating timestamps and authors in DB")
     print("=" * 50)

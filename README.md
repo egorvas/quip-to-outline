@@ -27,17 +27,17 @@ Direct migration from Quip to self-hosted Outline wiki via API. No intermediate 
 pip install quip-to-outline
 ```
 
-Or with pipx (isolated environment):
+With database support (for timestamp/author updates in Outline DB):
+
+```bash
+pip install quip-to-outline[db]
+```
+
+Or with pipx:
 
 ```bash
 pipx install quip-to-outline
-```
-
-Or run directly without installing:
-
-```bash
-pipx run quip-to-outline --init
-pipx run quip-to-outline
+pipx install quip-to-outline[db]   # with DB support
 ```
 
 **Recommended:** Disable Outline rate limiting before import. Add to your Outline environment:
@@ -56,35 +56,49 @@ Restart Outline, then re-enable after migration.
 quip-to-outline --init
 ```
 
-Edit `config.json`:
+Edit `config.json` with required fields:
 
 ```json
 {
   "outline_url": "http://your-outline:3000",
   "outline_api_token": "ol_api_...",
   "quip_api_token": "YOUR_QUIP_TOKEN",
-  "db_host": "localhost",
-  "db_port": 5432,
-  "db_user": "outline",
-  "db_password": "your_db_password",
-  "db_name": "outline",
   "quip_concurrency": 5,
   "blob_concurrency": 8
 }
 ```
 
-| Field | Description |
-|-------|-------------|
-| `outline_url` | URL of your Outline instance |
-| `outline_api_token` | Outline API token (Settings -> API) |
-| `quip_api_token` | Quip API token (https://quip.com/dev/token) |
-| `db_host` | PostgreSQL host for Outline database |
-| `db_port` | PostgreSQL port |
-| `db_user` | PostgreSQL user |
-| `db_password` | PostgreSQL password |
-| `db_name` | PostgreSQL database name |
-| `quip_concurrency` | Max parallel Quip API requests (default: 5) |
-| `blob_concurrency` | Max parallel image/file downloads (default: 8) |
+**Optional:** Add database fields to enable timestamp/author updates directly in DB:
+
+```json
+{
+  "outline_url": "http://your-outline:3000",
+  "outline_api_token": "ol_api_...",
+  "quip_api_token": "YOUR_QUIP_TOKEN",
+  "quip_concurrency": 5,
+  "blob_concurrency": 8,
+  "db_host": "localhost",
+  "db_port": 5432,
+  "db_user": "outline",
+  "db_password": "your_db_password",
+  "db_name": "outline"
+}
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `outline_url` | Yes | URL of your Outline instance |
+| `outline_api_token` | Yes | Outline API token (Settings -> API) |
+| `quip_api_token` | Yes | Quip API token (https://quip.com/dev/token) |
+| `quip_concurrency` | No | Max parallel Quip API requests (default: 5) |
+| `blob_concurrency` | No | Max parallel image/file downloads (default: 8) |
+| `db_host` | No | PostgreSQL host — enables timestamp/author DB updates |
+| `db_port` | No | PostgreSQL port (default: 5432) |
+| `db_user` | No | PostgreSQL user (default: outline) |
+| `db_password` | No | PostgreSQL password — **if empty, DB features disabled** |
+| `db_name` | No | PostgreSQL database name (default: outline) |
+
+Without database configuration, the script still imports all documents, comments, and creates users — but original Quip timestamps and author attribution in the DB won't be set.
 
 ### Step 2: Run migration
 
