@@ -689,6 +689,65 @@ def outline_upload_attachment(blob_bytes, filename, content_type):
         return None
 
 
+# --- Progress tracking ---
+
+class Progress:
+    """Tracks migration progress with ETA calculation."""
+
+    def __init__(self, total):
+        self.total = total
+        self.done = 0
+        self.skipped = 0
+        self.errors = 0
+        self.start_time = time.monotonic()
+
+    def _eta(self):
+        elapsed = time.monotonic() - self.start_time
+        processed = self.done + self.skipped + self.errors
+        if processed == 0 or elapsed < 1:
+            return ""
+        rate = processed / elapsed
+        remaining = (self.total - processed) / rate
+        if remaining < 60:
+            return f"~{remaining:.0f}s left"
+        return f"~{remaining / 60:.0f}m left"
+
+    def _prefix(self):
+        processed = self.done + self.skipped + self.errors
+        pct = processed * 100 // self.total if self.total else 0
+        eta = self._eta()
+        eta_str = f" {eta}" if eta else ""
+        return f"[{processed}/{self.total} {pct}%{eta_str}]"
+
+    def log_imported(self, title, extras=""):
+        self.done += 1
+        print(f"  {self._prefix()} [+] {title}{extras}")
+
+    def log_skipped(self, title, reason=""):
+        self.skipped += 1
+        r = f" ({reason})" if reason else ""
+        print(f"  {self._prefix()} [skip] {title}{r}")
+
+    def log_error(self, title, error):
+        self.errors += 1
+        print(f"  {self._prefix()} [ERROR] {title}: {error}")
+
+    def log_folder(self, title):
+        print(f"  {self._prefix()} [folder] {title}/")
+
+    def summary(self):
+        elapsed = time.monotonic() - self.start_time
+        if elapsed < 60:
+            time_str = f"{elapsed:.0f}s"
+        else:
+            time_str = f"{elapsed / 60:.1f}m"
+        print(f"\n  Done in {time_str}: {self.done} imported, {self.skipped} skipped, {self.errors} errors")
+
+
+# Global progress instance, set in main()
+progress = None
+
+
 # --- Process single thread ---
 
 def process_thread(thread_id, collection_id, parent_doc_id, thread_data, author_mapping, user_names, state):
@@ -699,14 +758,16 @@ def process_thread(thread_id, collection_id, parent_doc_id, thread_data, author_
     """
     if thread_id in state["imported_threads"]:
         title = state["imported_threads"][thread_id].get("title", thread_id)
-        print(f"    [skip] {title}")
+        if progress:
+            progress.log_skipped(title)
         return None
 
     title = thread_data.get("title", thread_id)
     html = thread_data.get("html", "")
 
     if not html:
-        print(f"    [skip] {title} (no HTML)")
+        if progress:
+            progress.log_skipped(title, "no HTML")
         return None
 
     try:
@@ -828,7 +889,8 @@ def process_thread(thread_id, collection_id, parent_doc_id, thread_data, author_
         if comment_count:
             extras.append(f"{comment_count} comments")
         extra_str = f" ({', '.join(extras)})" if extras else ""
-        print(f"    [+] {title}{extra_str}")
+        if progress:
+            progress.log_imported(title, extra_str)
 
         # Track in state
         state["imported_threads"][thread_id] = {
@@ -840,7 +902,8 @@ def process_thread(thread_id, collection_id, parent_doc_id, thread_data, author_
         return doc_id, comment_data
 
     except Exception as e:
-        print(f"    [ERROR] {title}: {e}")
+        if progress:
+            progress.log_error(title, e)
         return None
 
 
@@ -866,8 +929,8 @@ def import_folder(node, collection_id, parent_doc_id, thread_data_map, author_ma
     # Import subfolders
     for fid, sub_node in node["subfolders"].items():
         folder_title = sub_node["title"]
-        indent = "  " * (depth + 2)
-        print(f"{indent}[folder] {folder_title}/")
+        if progress:
+            progress.log_folder(folder_title)
 
         # Create or reuse folder parent doc
         folder_doc_key = f"{collection_id}:{fid}"
@@ -1124,6 +1187,16 @@ def main():
     print("Phase 4: Importing into Outline")
     print("=" * 50)
 
+    # Count total threads for progress
+    global progress
+    def count_all(node):
+        n = len(node["thread_ids"])
+        for sub in node["subfolders"].values():
+            n += count_all(sub)
+        return n
+    total_threads = sum(count_all(s) for s in spaces.values())
+    progress = Progress(total_threads)
+
     colors = ["#4B9EFF", "#FF6B6B", "#50C878", "#FF8C00", "#9370DB", "#20B2AA"]
     total_imported = 0
     total_errors = 0
@@ -1185,14 +1258,14 @@ def main():
 
         save_state(state)
 
-    print(f"\n  Import done: {total_imported} documents, {total_errors} errors")
+    progress.summary()
 
     # Phase 5: Update DB
     update_db(state, thread_data_map, user_names, author_mapping)
 
     save_state(state)
     print(f"\n{'='*50}")
-    print(f"All done! {total_imported} documents migrated.")
+    print(f"All done! {progress.done} imported, {progress.skipped} skipped, {progress.errors} errors.")
 
 
 def print_help():
