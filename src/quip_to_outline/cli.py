@@ -143,7 +143,20 @@ def load_state():
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE) as f:
             return json.load(f)
-    return {"imported_threads": {}, "collections": {}, "folder_docs": {}}
+    return new_state()
+
+
+def new_state():
+    return {
+        "imported_threads": {},
+        "collections": {},
+        "folder_docs": {},
+        "cache": {
+            "spaces": None,         # folder tree from Phase 1
+            "thread_data": None,    # {thread_id: {title, created_usec, ...}} from Phase 2 (without html)
+            "user_names": None,     # {quip_user_id: name}
+        },
+    }
 
 
 def save_state(state):
@@ -354,11 +367,23 @@ def outline_upload(html_bytes, filename, collection_id, parent_doc_id=None, retr
 
 # --- Quip folder walk ---
 
-def walk_quip_folders():
-    """Walk all Quip folders. Returns {space_name: FolderNode tree}."""
+def walk_quip_folders(state):
+    """Walk all Quip folders. Returns {space_name: FolderNode tree}. Uses cache if available."""
     print("=" * 50)
     print("Phase 1: Walking Quip folder tree")
     print("=" * 50)
+
+    cached = state.get("cache", {}).get("spaces")
+    if cached:
+        # Count threads from cache
+        def count_threads(node):
+            n = len(node["thread_ids"])
+            for sub in node["subfolders"].values():
+                n += count_threads(sub)
+            return n
+        total = sum(count_threads(s) for s in cached.values())
+        print(f"  [cached] {total} threads in {len(cached)} spaces")
+        return cached
 
     user = quip_get("users/current")
     root_ids = user.get("shared_folder_ids", []) + user.get("group_folder_ids", [])
@@ -416,6 +441,10 @@ def walk_quip_folders():
     total = sum(count_threads(s) for s in spaces.values())
     print(f"\n  Total: {total} threads in {len(visited)} folders")
 
+    # Cache folder tree
+    state.setdefault("cache", {})["spaces"] = spaces
+    save_state(state)
+
     return spaces
 
 
@@ -424,6 +453,8 @@ def walk_quip_folders():
 def fetch_thread_data(spaces, state):
     """Batch fetch metadata + HTML for all threads in one pass.
 
+    Caches metadata and user_names in state. HTML is only fetched for new threads.
+
     Returns (thread_data, user_names):
       thread_data: {thread_id: {title, created_usec, updated_usec, author_id, author_name, html}}
       user_names: {quip_user_id: name}
@@ -431,6 +462,10 @@ def fetch_thread_data(spaces, state):
     print("\n" + "=" * 50)
     print("Phase 2: Fetching thread data (metadata + HTML)")
     print("=" * 50)
+
+    cache = state.setdefault("cache", {})
+    cached_threads = cache.get("thread_data") or {}  # metadata without html
+    cached_user_names = cache.get("user_names") or {}
 
     # Collect all thread IDs and folder member IDs
     all_ids = set()
@@ -445,64 +480,89 @@ def fetch_thread_data(spaces, state):
     for space in spaces.values():
         collect(space)
 
-    # Skip already imported
-    new_ids = all_ids - set(state["imported_threads"].keys())
-    print(f"  Total threads: {len(all_ids)}, new: {len(new_ids)}, skipped: {len(all_ids) - len(new_ids)}")
+    # Determine which threads need fetching:
+    # - already imported → skip entirely (use state)
+    # - metadata cached but not imported → need HTML only (re-fetch)
+    # - not cached at all → need full fetch
+    imported_ids = set(state["imported_threads"].keys())
+    cached_ids = set(cached_threads.keys())
+    new_ids = all_ids - imported_ids - cached_ids   # need full fetch
+    need_html_ids = (all_ids - imported_ids) & cached_ids  # have metadata, need HTML
+
+    print(f"  Total: {len(all_ids)}, imported: {len(all_ids & imported_ids)}, "
+          f"cached: {len(need_html_ids)}, new: {len(new_ids)}")
 
     threads = {}
     author_ids = set()
-    id_list = list(new_ids)
-    batch_size = 6
-    total_batches = (len(id_list) + batch_size - 1) // batch_size
 
-    for i in range(0, len(id_list), batch_size):
-        batch = id_list[i:i + batch_size]
-        batch_num = i // batch_size + 1
-        print(f"\r    Batch {batch_num}/{total_batches} ({len(threads)} fetched)", end="", flush=True)
-        try:
-            result = quip_get(f"threads/?ids={','.join(batch)}")
-            for tid, tdata in result.items():
-                t = tdata.get("thread", {})
-                threads[tid] = {
-                    "title": t.get("title", "").strip(),
-                    "created_usec": t.get("created_usec"),
-                    "updated_usec": t.get("updated_usec"),
-                    "author_id": t.get("author_id"),
-                    "html": tdata.get("html", ""),
-                }
-                if t.get("author_id"):
-                    author_ids.add(t["author_id"])
-        except Exception as e:
-            print(f"\n    Warning: batch failed: {e}")
-    print()
+    # Fetch new threads (metadata + HTML in one batch call)
+    ids_to_fetch = list(new_ids | need_html_ids)
+    if ids_to_fetch:
+        batch_size = 6
+        total_batches = (len(ids_to_fetch) + batch_size - 1) // batch_size
+        for i in range(0, len(ids_to_fetch), batch_size):
+            batch = ids_to_fetch[i:i + batch_size]
+            batch_num = i // batch_size + 1
+            print(f"\r    Batch {batch_num}/{total_batches} ({len(threads)} fetched)", end="", flush=True)
+            try:
+                result = quip_get(f"threads/?ids={','.join(batch)}")
+                for tid, tdata in result.items():
+                    t = tdata.get("thread", {})
+                    meta = {
+                        "title": t.get("title", "").strip(),
+                        "created_usec": t.get("created_usec"),
+                        "updated_usec": t.get("updated_usec"),
+                        "author_id": t.get("author_id"),
+                    }
+                    threads[tid] = {**meta, "html": tdata.get("html", "")}
+                    # Cache metadata (without html — too large)
+                    cached_threads[tid] = meta
+                    if t.get("author_id"):
+                        author_ids.add(t["author_id"])
+            except Exception as e:
+                print(f"\n    Warning: batch failed: {e}")
+        print()
+    else:
+        print("  All threads already fetched")
 
-    # Also add metadata-only for already imported (for DB update phase)
-    for tid in (all_ids - new_ids):
+    # Add metadata for already-imported threads (for DB update phase)
+    for tid in (all_ids & imported_ids):
         if tid not in threads:
-            threads[tid] = state["imported_threads"].get(tid, {})
+            threads[tid] = cached_threads.get(tid) or state["imported_threads"].get(tid, {})
 
     # Include folder members in user resolution (skip if no users/permissions)
     if not OPT_NO_USERS:
         author_ids.update(all_member_ids)
 
-    # Resolve author names
-    print(f"  Resolving {len(author_ids)} user names...")
-    user_names = {}  # quip_user_id -> name
-    uid_list = list(author_ids)
-    for i in range(0, len(uid_list), batch_size):
-        batch = uid_list[i:i + batch_size]
-        try:
-            result = quip_get(f"users/?ids={','.join(batch)}")
-            for uid, udata in result.items():
-                user_names[uid] = udata.get("name", "")
-        except Exception:
-            pass
+    # Resolve user names — only fetch unknown ones
+    new_author_ids = author_ids - set(cached_user_names.keys())
+    if new_author_ids:
+        print(f"  Resolving {len(new_author_ids)} new user names ({len(cached_user_names)} cached)...")
+        batch_size = 6
+        uid_list = list(new_author_ids)
+        for i in range(0, len(uid_list), batch_size):
+            batch = uid_list[i:i + batch_size]
+            try:
+                result = quip_get(f"users/?ids={','.join(batch)}")
+                for uid, udata in result.items():
+                    cached_user_names[uid] = udata.get("name", "")
+            except Exception:
+                pass
+    else:
+        print(f"  User names: {len(cached_user_names)} (all cached)")
 
-    # Attach author names
+    user_names = cached_user_names
+
+    # Attach author names to thread data
     for meta in threads.values():
         aid = meta.get("author_id")
         if aid and aid in user_names:
             meta["author_name"] = user_names[aid]
+
+    # Save cache
+    cache["thread_data"] = cached_threads
+    cache["user_names"] = cached_user_names
+    save_state(state)
 
     print(f"  Done: {len(threads)} threads, {len(user_names)} authors")
     return threads, user_names
@@ -967,8 +1027,12 @@ def update_db(state, thread_meta_map, user_names, author_mapping):
 def main():
     state = load_state()
 
+    # Ensure cache structure exists (for older state files)
+    if "cache" not in state:
+        state["cache"] = {"spaces": None, "thread_data": None, "user_names": None}
+
     # Phase 1: Walk Quip folders
-    spaces = walk_quip_folders()
+    spaces = walk_quip_folders(state)
     if not spaces:
         print("No folders found.")
         return
@@ -1073,6 +1137,8 @@ Options:
   --noAttachments     Skip image/file downloads (text only)
   --noUsers           Skip user creation (implies --noPermissions)
                       Comments will include author name + timestamp in text
+  --resetCache        Clear cached Quip data, re-fetch everything
+                      Import progress (already imported docs) is preserved
 
 Workflow:
   1. quip-to-outline --init
@@ -1095,9 +1161,16 @@ def parse_flags():
     OPT_NO_PERMISSIONS = "--nopermissions" in args_lower
     OPT_NO_ATTACHMENTS = "--noattachments" in args_lower
     OPT_NO_USERS = "--nousers" in args_lower
-    # --noUsers implies --noPermissions
     if OPT_NO_USERS:
         OPT_NO_PERMISSIONS = True
+
+    # --resetCache: clear cached Quip data, keep import progress
+    if "--resetcache" in args_lower:
+        if os.path.exists(STATE_FILE):
+            state = load_state()
+            state["cache"] = {"spaces": None, "thread_data": None, "user_names": None}
+            save_state(state)
+        print("Cache cleared (import progress preserved)")
 
     flags = []
     if OPT_NO_COMMENTS:     flags.append("noComments")
