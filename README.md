@@ -112,10 +112,13 @@ quip-to-outline [options]
 | `--noAttachments` | Skip image/file downloads. Text-only import, much faster. |
 | `--noUsers` | Skip user creation. Implies `--noPermissions`. All content attributed to admin. |
 | `--noPermissions` | Skip permission sync. Collections accessible to everyone. |
+| `--folders a,b,c` | Only migrate specified folders (comma-separated names). |
+| `--resetCache` | Clear cached Quip data, re-fetch from API. Import progress is preserved. |
 
 When `--noUsers` is set but comments are enabled, comments include the original author name and timestamp in the text:
+
 ```
-[Alex Nsk, 25 Sep 2025 12:43]
+[John Doe, 25 Sep 2025 12:43]
 Comment text here
 ```
 
@@ -128,21 +131,36 @@ quip-to-outline
 # Text only, no images (fastest)
 quip-to-outline --noAttachments
 
+# Only specific folders
+quip-to-outline --folders devOps,kosAccess
+
 # No user management, just content
 quip-to-outline --noUsers --noComments
 
 # Import with comments but without images and permissions
 quip-to-outline --noAttachments --noPermissions
+
+# Re-fetch Quip data after adding new documents
+quip-to-outline --resetCache
 ```
 
-### Re-running
+### Caching and resume
 
-Safe to re-run at any time. The script:
-- Skips already-imported documents (tracked by Quip thread ID in `state.json`)
-- Reuses previously created Outline users (from `author_mapping.json`)
-- Skips already-fetched thread data
+The script caches Quip API data in `state.json` to minimize API calls on re-run:
 
-Delete `state.json` to force a full re-import.
+| Data | Cached | On restart |
+|------|--------|------------|
+| Folder tree | Yes | 0 Quip API calls |
+| Thread metadata | Yes | Only new threads fetched |
+| User names | Yes | Only new users resolved |
+| Thread HTML | No (too large) | Fetched for non-imported threads |
+| Import progress | Yes | Skips already imported |
+
+On restart, the script picks up exactly where it left off — no wasted API calls.
+
+- `--resetCache` clears the Quip data cache but preserves import progress
+- `--folders` applies a filter on the cached tree — no extra API calls
+- Delete `state.json` entirely to start from scratch
 
 ## How it works
 

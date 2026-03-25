@@ -97,6 +97,7 @@ OPT_NO_COMMENTS = False
 OPT_NO_PERMISSIONS = False
 OPT_NO_ATTACHMENTS = False
 OPT_NO_USERS = False
+OPT_FOLDERS = None  # None = all, or set of folder names to include
 
 
 def load_config():
@@ -1022,6 +1023,70 @@ def update_db(state, thread_meta_map, user_names, author_mapping):
     print(f"  Comments updated: {comment_updated}")
 
 
+# --- Folder filter ---
+
+def filter_spaces(spaces, folder_names):
+    """Filter spaces tree to only include matching folders.
+
+    Matches against subfolder titles (case-insensitive).
+    The space (root) is kept if any of its subfolders match.
+    Top-level threads in the space are excluded unless the space title itself matches.
+    """
+    folder_names_lower = {n.lower() for n in folder_names}
+    filtered = {}
+
+    for fid, space in spaces.items():
+        space_title_lower = space["title"].lower()
+
+        # Check if the space itself matches
+        if space_title_lower in folder_names_lower:
+            filtered[fid] = space
+            continue
+
+        # Filter subfolders
+        matched_subfolders = {}
+        for sub_fid, sub_node in space["subfolders"].items():
+            if _folder_matches(sub_node, folder_names_lower):
+                matched_subfolders[sub_fid] = sub_node
+
+        if matched_subfolders:
+            # Keep space but only with matched subfolders (no top-level threads)
+            filtered[fid] = {
+                **space,
+                "thread_ids": [],
+                "subfolders": matched_subfolders,
+            }
+
+    # Print what matched
+    def count_threads(node):
+        n = len(node["thread_ids"])
+        for sub in node["subfolders"].values():
+            n += count_threads(sub)
+        return n
+
+    total = sum(count_threads(s) for s in filtered.values())
+    matched_names = set()
+    for s in filtered.values():
+        for sub in s["subfolders"].values():
+            matched_names.add(sub["title"])
+    print(f"  Filtered: {len(matched_names)} folders, {total} threads")
+    if matched_names:
+        for name in sorted(matched_names):
+            print(f"    - {name}")
+
+    return filtered
+
+
+def _folder_matches(node, names_lower):
+    """Check if folder or any of its children match the filter."""
+    if node["title"].lower() in names_lower:
+        return True
+    for sub in node["subfolders"].values():
+        if _folder_matches(sub, names_lower):
+            return True
+    return False
+
+
 # --- Main ---
 
 def main():
@@ -1031,11 +1096,18 @@ def main():
     if "cache" not in state:
         state["cache"] = {"spaces": None, "thread_data": None, "user_names": None}
 
-    # Phase 1: Walk Quip folders
+    # Phase 1: Walk Quip folders (full tree, cached)
     spaces = walk_quip_folders(state)
     if not spaces:
         print("No folders found.")
         return
+
+    # Apply --folders filter (on cached full tree)
+    if OPT_FOLDERS:
+        spaces = filter_spaces(spaces, OPT_FOLDERS)
+        if not spaces:
+            print(f"No folders matched: {', '.join(OPT_FOLDERS)}")
+            return
 
     # Phase 2: Fetch thread data (metadata + HTML in one pass)
     thread_data_map, user_names = fetch_thread_data(spaces, state)
@@ -1139,6 +1211,8 @@ Options:
                       Comments will include author name + timestamp in text
   --resetCache        Clear cached Quip data, re-fetch everything
                       Import progress (already imported docs) is preserved
+  --folders a,b,c     Only migrate specified folders (comma-separated names)
+                      Full tree is cached; filter applied at runtime
 
 Workflow:
   1. quip-to-outline --init
@@ -1155,7 +1229,7 @@ Resume: safe to re-run, skips already imported documents (state.json).
 
 
 def parse_flags():
-    global OPT_NO_COMMENTS, OPT_NO_PERMISSIONS, OPT_NO_ATTACHMENTS, OPT_NO_USERS
+    global OPT_NO_COMMENTS, OPT_NO_PERMISSIONS, OPT_NO_ATTACHMENTS, OPT_NO_USERS, OPT_FOLDERS
     args_lower = [a.lower() for a in sys.argv]
     OPT_NO_COMMENTS = "--nocomments" in args_lower
     OPT_NO_PERMISSIONS = "--nopermissions" in args_lower
@@ -1163,6 +1237,13 @@ def parse_flags():
     OPT_NO_USERS = "--nousers" in args_lower
     if OPT_NO_USERS:
         OPT_NO_PERMISSIONS = True
+
+    # --folders name1,name2,name3
+    for i, arg in enumerate(sys.argv):
+        if arg.lower() == "--folders" and i + 1 < len(sys.argv):
+            names = [n.strip() for n in sys.argv[i + 1].split(",") if n.strip()]
+            OPT_FOLDERS = set(names)
+            break
 
     # --resetCache: clear cached Quip data, keep import progress
     if "--resetcache" in args_lower:
@@ -1177,6 +1258,7 @@ def parse_flags():
     if OPT_NO_PERMISSIONS:  flags.append("noPermissions")
     if OPT_NO_ATTACHMENTS:  flags.append("noAttachments")
     if OPT_NO_USERS:        flags.append("noUsers")
+    if OPT_FOLDERS:          flags.append(f"folders: {','.join(sorted(OPT_FOLDERS))}")
     if flags:
         print(f"Mode: {', '.join(flags)}")
 
