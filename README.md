@@ -17,39 +17,52 @@ Direct migration from Quip to self-hosted Outline wiki via API. No intermediate 
 ## Prerequisites
 
 - Python 3.9+
-- Self-hosted Outline instance with PostgreSQL access
-- Quip API token — get it at https://quip.com/dev/token
+- Self-hosted Outline instance
+- Quip API token — <https://quip.com/dev/token>
 - Outline API token — Settings -> API in your Outline instance
+- (Optional) PostgreSQL access to Outline database — for timestamp/author updates
 
 ## Installation
-
-```bash
-pip install git+https://github.com/egorvas/quip-to-outline.git
-```
-
-Or with pipx:
 
 ```bash
 pipx install git+https://github.com/egorvas/quip-to-outline.git
 ```
 
+Or with pip:
+
+```bash
+pip install git+https://github.com/egorvas/quip-to-outline.git
+```
+
 **Recommended:** Disable Outline rate limiting before import. Add to your Outline environment:
 
-```
+```text
 RATE_LIMITER_ENABLED=false
 ```
 
 Restart Outline, then re-enable after migration.
 
-## Usage
+## Quick start
 
-### Step 1: Generate config
+```bash
+quip-to-outline --init          # 1. Generate config.json
+# edit config.json               # 2. Fill in credentials
+quip-to-outline --list          # 3. Preview Quip folders
+quip-to-outline --dryRun        # 4. See what will be imported
+quip-to-outline                 # 5. Run migration
+quip-to-outline --verify        # 6. Check results
+```
+
+## Configuration
+
+### Generate config
 
 ```bash
 quip-to-outline --init
+quip-to-outline --config ~/migration/config.json --init   # custom path
 ```
 
-Edit `config.json` with required fields:
+### Minimal config (API only)
 
 ```json
 {
@@ -61,7 +74,7 @@ Edit `config.json` with required fields:
 }
 ```
 
-**Optional:** Add database fields to enable timestamp/author updates directly in DB:
+### Full config (with database)
 
 ```json
 {
@@ -78,65 +91,129 @@ Edit `config.json` with required fields:
 }
 ```
 
-| Field | Required | Description |
-|-------|----------|-------------|
-| `outline_url` | Yes | URL of your Outline instance |
-| `outline_api_token` | Yes | Outline API token (Settings -> API) |
-| `quip_api_token` | Yes | Quip API token (https://quip.com/dev/token) |
-| `quip_concurrency` | No | Max parallel Quip API requests (default: 5) |
-| `blob_concurrency` | No | Max parallel image/file downloads (default: 8) |
-| `db_host` | No | PostgreSQL host — **if set, enables DB features** |
-| `db_port` | No | PostgreSQL port (default: 5432) |
-| `db_user` | No | PostgreSQL user (default: outline) |
-| `db_password` | No | PostgreSQL password (can be empty if no auth) |
-| `db_name` | No | PostgreSQL database name (default: outline) |
+### Config fields
 
-Without database configuration, the script still imports all documents, comments, and creates users — but original Quip timestamps and author attribution in the DB won't be set.
+| Field               | Required | Description                                                  |
+| ------------------- | -------- | ------------------------------------------------------------ |
+| `outline_url`       | Yes      | URL of your Outline instance                                 |
+| `outline_api_token` | Yes      | Outline API token (Settings -> API)                          |
+| `quip_api_token`    | Yes      | Quip API token                                               |
+| `quip_concurrency`  | No       | Max parallel Quip API requests (default: 5)                  |
+| `blob_concurrency`  | No       | Max parallel image/file downloads (default: 8)               |
+| `db_host`           | No       | PostgreSQL host — **if set, enables DB features**            |
+| `db_port`           | No       | PostgreSQL port (default: 5432)                              |
+| `db_user`           | No       | PostgreSQL user (default: outline)                           |
+| `db_password`       | No       | PostgreSQL password (can be empty if no auth)                |
+| `db_name`           | No       | PostgreSQL database name (default: outline)                  |
 
-### Step 2: Run migration
+Without database configuration, the script imports all documents, comments, and creates users — but original Quip timestamps and author attribution won't be set.
+
+## Commands
+
+### `--init` — Generate config template
+
+```bash
+quip-to-outline --init
+```
+
+Creates `config.json` in the current directory (or path from `--config`).
+
+### `--list` — Preview Quip folders
+
+```bash
+quip-to-outline --list
+```
+
+Shows the Quip folder tree without importing anything. Useful for choosing folders for `--folders` / `--noFolders`.
+
+### `--dryRun` — Simulate migration
+
+```bash
+quip-to-outline --dryRun
+quip-to-outline --dryRun --folders devOps,kosAccess
+```
+
+Shows a breakdown of what would be imported: documents per folder, how many are new vs already imported, which features are enabled.
+
+### `--status` — Show migration progress
+
+```bash
+quip-to-outline --status
+```
+
+Shows current state: imported documents, comments, collections, cache status, unmapped authors, and any documents not yet imported.
+
+### `--verify` — Validate migration
+
+```bash
+quip-to-outline --verify
+```
+
+Compares Quip threads vs Outline documents and reports:
+- Documents in Quip but missing in Outline
+- Documents in Outline state but deleted from Outline
+- Total match count
+
+### `--retry` — Re-import failed documents
+
+```bash
+quip-to-outline --retry
+```
+
+Clears cached data for documents that failed in a previous run and re-imports only those. Requires a previous run with cached data.
+
+### `--cleanup` — Remove everything from Outline
+
+```bash
+quip-to-outline --cleanup
+```
+
+Deletes all documents, collections, and folder docs created by the script (tracked in `state.json`). Asks for confirmation. Preserves cache so you can re-import without re-fetching from Quip.
+
+### (default) — Run migration
 
 ```bash
 quip-to-outline
 ```
 
-The script runs through these phases:
+Runs through all phases:
 
 1. **Walk Quip folders** — recursively discovers all folders and threads via API
 2. **Fetch thread data** — batch-fetches metadata + HTML for all threads in one pass
-3. **Create users** — matches Quip authors to existing Outline users; creates new users for unmatched authors
-4. **Import documents** — downloads images in parallel, uploads as Outline attachments, imports HTML via Outline API, creates comments with quoted context
-5. **Update DB** — sets original Quip timestamps and authors on documents and comments
+3. **Create users** — matches Quip authors to existing Outline users; creates new users for unmatched
+4. **Import documents** — downloads images in parallel, uploads as Outline attachments, imports HTML, creates comments with quoted context
+5. **Update DB** — sets original Quip timestamps and authors (if database configured)
 
-### Migration options
+## Options
 
-```bash
-quip-to-outline [options]
-```
+| Option              | Description                                                                             |
+| ------------------- | --------------------------------------------------------------------------------------- |
+| `--config PATH`     | Path to config.json (default: `./config.json`). All files stored next to config.        |
+| `--noComments`      | Skip comment migration. Saves 1 Quip API request per document.                         |
+| `--noAttachments`   | Skip image/file downloads. Text-only import, much faster.                               |
+| `--noUsers`         | Skip user creation. Implies `--noPermissions`. All content attributed to admin.         |
+| `--noPermissions`   | Skip permission sync. Collections accessible to everyone.                               |
+| `--folders a,b,c`   | Only migrate specified folders (comma-separated names).                                 |
+| `--noFolders a,b,c` | Exclude specified folders from migration.                                               |
+| `--resetCache`      | Clear cached Quip data, re-fetch from API. Import progress preserved.                   |
 
-| Option | Description |
-|--------|-------------|
-| `--noComments` | Skip comment migration. Saves 1 Quip API request per document. |
-| `--noAttachments` | Skip image/file downloads. Text-only import, much faster. |
-| `--noUsers` | Skip user creation. Implies `--noPermissions`. All content attributed to admin. |
-| `--noPermissions` | Skip permission sync. Collections accessible to everyone. |
-| `--folders a,b,c` | Only migrate specified folders (comma-separated names). |
-| `--noFolders a,b,c` | Exclude specified folders from migration. |
-| `--resetCache` | Clear cached Quip data, re-fetch from API. Import progress is preserved. |
+`--folders` and `--noFolders` can be used together, but the same folder in both is an error.
 
-Using `--folders` and `--noFolders` together is allowed, but the same folder in both is an error.
+When `--noUsers` is set but comments are enabled, comments include the original author name and timestamp:
 
-When `--noUsers` is set but comments are enabled, comments include the original author name and timestamp in the text:
-
-```
+```text
 [John Doe, 25 Sep 2025 12:43]
 Comment text here
 ```
 
-#### Examples
+## Examples
 
 ```bash
-# Full migration (all features)
+# Full migration
 quip-to-outline
+
+# Custom config location
+quip-to-outline --config ~/migration/config.json
 
 # Text only, no images (fastest)
 quip-to-outline --noAttachments
@@ -144,32 +221,43 @@ quip-to-outline --noAttachments
 # Only specific folders
 quip-to-outline --folders devOps,kosAccess
 
-# No user management, just content
+# Everything except archive
+quip-to-outline --noFolders Archive,Feedbacks
+
+# Minimal: docs only, no users/comments
 quip-to-outline --noUsers --noComments
 
-# Import with comments but without images and permissions
-quip-to-outline --noAttachments --noPermissions
-
-# Re-fetch Quip data after adding new documents
+# Re-fetch after new docs added in Quip
 quip-to-outline --resetCache
+
+# Check what will be imported before running
+quip-to-outline --dryRun --folders kosAccess
+
+# Retry only failed documents
+quip-to-outline --retry
+
+# Start over: remove from Outline, re-import
+quip-to-outline --cleanup
+quip-to-outline
 ```
 
-### Caching and resume
+## Caching and resume
 
 The script caches Quip API data in `state.json` to minimize API calls on re-run:
 
-| Data | Cached | On restart |
-|------|--------|------------|
-| Folder tree | Yes | 0 Quip API calls |
-| Thread metadata | Yes | Only new threads fetched |
-| User names | Yes | Only new users resolved |
-| Thread HTML | No (too large) | Fetched for non-imported threads |
-| Import progress | Yes | Skips already imported |
+| Data            | Cached | On restart                       |
+| --------------- | ------ | -------------------------------- |
+| Folder tree     | Yes    | 0 Quip API calls                 |
+| Thread metadata | Yes    | Only new threads fetched         |
+| User names      | Yes    | Only new users resolved          |
+| Thread HTML     | No     | Fetched for non-imported threads |
+| Import progress | Yes    | Skips already imported           |
 
 On restart, the script picks up exactly where it left off — no wasted API calls.
 
 - `--resetCache` clears the Quip data cache but preserves import progress
-- `--folders` applies a filter on the cached tree — no extra API calls
+- `--folders` / `--noFolders` filter the cached tree — no extra API calls
+- `--status` shows what's cached and what's pending
 - Delete `state.json` entirely to start from scratch
 
 ## How it works
@@ -177,6 +265,7 @@ On restart, the script picks up exactly where it left off — no wasted API call
 ### Quip API rate limiting
 
 Quip allows ~50 requests/minute per user and ~600/minute per company. The script reads rate limit headers (`X-Ratelimit-Remaining`, `X-Ratelimit-Reset`) from every response and automatically:
+
 - Sends requests as fast as the limit allows
 - Pauses when quota is exhausted, waiting exactly until the reset time
 - Backs off adaptively on 429/503 errors
@@ -187,7 +276,7 @@ Images referenced in Quip documents are downloaded in parallel (configurable via
 
 ### Comments
 
-Comments are fetched via Quip Messages API (`/messages/{thread_id}`), which provides structured data: author ID, exact timestamp (microsecond precision), and text. If the comment was attached to specific text in Quip (annotation), the quoted text is included in the comment as an italic citation.
+Comments are fetched via Quip Messages API, which provides structured data: author ID, exact timestamp (microsecond precision), and text. If the comment was attached to specific text in Quip (annotation), the quoted text is included in the comment as an italic citation.
 
 ### Permissions
 
@@ -195,11 +284,11 @@ Quip folder `member_ids` are mapped to Outline collection permissions. All folde
 
 ## Generated files
 
-| File | Description |
-|------|-------------|
-| `config.json` | Credentials — **do not share or commit** |
-| `state.json` | Migration progress — tracks imported threads for resume |
-| `author_mapping.json` | Quip author name -> Outline user ID mapping |
+| File                  | Description                                             |
+| --------------------- | ------------------------------------------------------- |
+| `config.json`         | Credentials — **do not share or commit**                |
+| `state.json`          | Migration progress and cache — tracks imported threads  |
+| `author_mapping.json` | Quip author name -> Outline user ID mapping             |
 
 ## Troubleshooting
 
@@ -207,6 +296,8 @@ Quip folder `member_ids` are mapped to Outline collection permissions. All folde
 
 **Outline 400 on large documents** — some documents with many large images may exceed Outline's body size limit. The script uploads images as separate attachments to avoid this. If it still fails, try `--noAttachments`.
 
-**Resume after crash** — just re-run. The script reads `state.json` and skips already-imported documents.
+**Resume after crash** — just re-run. The script reads `state.json` and skips already-imported documents. Or use `--retry` to re-import only failed ones.
 
-**Wrong permissions** — delete the collection in Outline and re-run. Or use `--noPermissions` and set permissions manually.
+**Wrong permissions** — use `--cleanup` and re-run, or `--noPermissions` to set them manually.
+
+**Verify results** — run `--verify` after migration to check for missing documents.
