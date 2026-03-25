@@ -110,6 +110,8 @@ OPT_NO_ATTACHMENTS = False
 OPT_NO_USERS = False
 OPT_FOLDERS = None      # None = all, or set of folder names to include
 OPT_NO_FOLDERS = None   # None = none excluded, or set of folder names to exclude
+OPT_INCLUDE_PRIVATE = False
+OPT_INCLUDE_DESKTOP = False
 
 
 def load_config():
@@ -412,14 +414,20 @@ def walk_quip_folders(state):
     user = quip_get("users/current")
     user_name = user.get("name", "")
     root_ids = user.get("shared_folder_ids", []) + user.get("group_folder_ids", [])
-    # Track which folders are private/desktop
+    # Include private/desktop only if explicitly requested
     private_folder_ids = set()
-    for key in ("private_folder_id", "desktop_folder_id"):
-        fid = user.get(key)
+    if OPT_INCLUDE_PRIVATE:
+        fid = user.get("private_folder_id")
         if fid and fid not in root_ids:
             root_ids.append(fid)
             private_folder_ids.add(fid)
-    print(f"  Root folders: {len(root_ids)} ({len(private_folder_ids)} personal)")
+    if OPT_INCLUDE_DESKTOP:
+        fid = user.get("desktop_folder_id")
+        if fid and fid not in root_ids:
+            root_ids.append(fid)
+            private_folder_ids.add(fid)
+    personal_str = f" + {len(private_folder_ids)} personal" if private_folder_ids else ""
+    print(f"  Root folders: {len(root_ids)}{personal_str}")
 
     all_threads = {}   # thread_id -> {title, created_usec, updated_usec, author_id}
     tree = {}          # folder_id -> {title, thread_ids, subfolders: {folder_id: ...}}
@@ -1396,6 +1404,8 @@ Options:
   --resetCache        Clear all cached Quip data, re-fetch everything
   --folders a,b,c     Only migrate specified folders
   --noFolders a,b,c   Exclude specified folders
+  --private           Include personal Private folder
+  --desktop           Include personal Desktop folder
 
 Examples:
   quip-to-outline --init                             Setup
@@ -1411,7 +1421,7 @@ Examples:
 
 def parse_flags():
     global OPT_NO_COMMENTS, OPT_NO_PERMISSIONS, OPT_NO_ATTACHMENTS, OPT_NO_USERS
-    global OPT_FOLDERS, OPT_NO_FOLDERS
+    global OPT_FOLDERS, OPT_NO_FOLDERS, OPT_INCLUDE_PRIVATE, OPT_INCLUDE_DESKTOP
     args_lower = [a.lower() for a in sys.argv]
     OPT_NO_COMMENTS = "--nocomments" in args_lower
     OPT_NO_PERMISSIONS = "--nopermissions" in args_lower
@@ -1433,6 +1443,9 @@ def parse_flags():
             names = [n.strip() for n in sys.argv[i + 1].split(",") if n.strip()]
             OPT_NO_FOLDERS = set(names)
             break
+
+    OPT_INCLUDE_PRIVATE = "--private" in args_lower
+    OPT_INCLUDE_DESKTOP = "--desktop" in args_lower
 
     # Validate: same folder in both is an error
     if OPT_FOLDERS and OPT_NO_FOLDERS:
@@ -1472,6 +1485,8 @@ def parse_flags():
     if OPT_NO_USERS:        flags.append("noUsers")
     if OPT_FOLDERS:          flags.append(f"folders: {','.join(sorted(OPT_FOLDERS))}")
     if OPT_NO_FOLDERS:       flags.append(f"noFolders: {','.join(sorted(OPT_NO_FOLDERS))}")
+    if OPT_INCLUDE_PRIVATE:  flags.append("private")
+    if OPT_INCLUDE_DESKTOP:  flags.append("desktop")
     if flags:
         print(f"Mode: {', '.join(flags)}")
 
@@ -1896,7 +1911,7 @@ KNOWN_ARGS = {
     "--help", "-h", "--init", "--list", "--status", "--dryrun", "--verify",
     "--retry", "--cleanup", "--remove", "--config", "--nocomments", "--nopermissions",
     "--noattachments", "--nousers", "--resetcache", "--resettree",
-    "--folders", "--nofolders",
+    "--folders", "--nofolders", "--private", "--desktop",
 }
 
 # Args that take a value after them

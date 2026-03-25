@@ -195,7 +195,10 @@ Runs through all phases:
 | `--noPermissions`   | Skip permission sync. Collections accessible to everyone.                               |
 | `--folders a,b,c`   | Only migrate specified folders (comma-separated names).                                 |
 | `--noFolders a,b,c` | Exclude specified folders from migration.                                               |
-| `--resetCache`      | Clear cached Quip data, re-fetch from API. Import progress preserved.                   |
+| `--private`         | Include personal Private folder (excluded by default).                                  |
+| `--desktop`         | Include personal Desktop folder (excluded by default).                                  |
+| `--resetTree`       | Clear folder tree cache only, re-walk Quip folders.                                     |
+| `--resetCache`      | Clear all cached Quip data, re-fetch from API. Import progress preserved.               |
 
 `--folders` and `--noFolders` can be used together, but the same folder in both is an error.
 
@@ -226,6 +229,9 @@ quip-to-outline --noFolders Archive,Feedbacks
 
 # Minimal: docs only, no users/comments
 quip-to-outline --noUsers --noComments
+
+# Include personal folders
+quip-to-outline --private --desktop
 
 # Re-fetch after new docs added in Quip
 quip-to-outline --resetCache
