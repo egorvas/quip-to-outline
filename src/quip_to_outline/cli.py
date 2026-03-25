@@ -1019,8 +1019,11 @@ def sync_collection_permissions(collection_id, folder_node, user_names, author_m
 
 # --- Update DB ---
 
-def update_db(state, thread_meta_map, user_names, author_mapping):
-    """Update timestamps and authors in Outline DB."""
+def update_db(state, thread_meta_map, user_names, author_mapping, current_run_ids=None):
+    """Update timestamps and authors in Outline DB.
+
+    If current_run_ids is set, only update those threads. Otherwise update all.
+    """
     if not DB_ENABLED:
         print("\n  Skipping DB update (no database configured)")
         return
@@ -1029,12 +1032,18 @@ def update_db(state, thread_meta_map, user_names, author_mapping):
     print("Phase 5: Updating timestamps and authors in DB")
     print("=" * 50)
 
+    thread_ids_to_update = current_run_ids or set(state["imported_threads"].keys())
+    print(f"  Threads to update: {len(thread_ids_to_update)}")
+
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
 
     # Update documents
     doc_updated = 0
-    for tid, info in state["imported_threads"].items():
+    for tid in thread_ids_to_update:
+        info = state["imported_threads"].get(tid)
+        if not info:
+            continue
         meta = thread_meta_map.get(tid)
         if not meta:
             continue
@@ -1068,7 +1077,10 @@ def update_db(state, thread_meta_map, user_names, author_mapping):
     # Update comments (skip if noUsers — date already in comment text)
     comment_updated = 0
     if not OPT_NO_USERS:
-        for tid, info in state["imported_threads"].items():
+        for tid in thread_ids_to_update:
+            info = state["imported_threads"].get(tid)
+            if not info:
+                continue
             for cdata in info.get("comments", []):
                 comment_id = cdata.get("comment_id")
                 if not comment_id:
@@ -1247,6 +1259,15 @@ def main():
     total_threads = sum(count_all(s) for s in spaces.values())
     progress = Progress(total_threads)
 
+    # Collect all thread IDs in current filtered scope
+    current_run_ids = set()
+    def collect_ids(node):
+        current_run_ids.update(node["thread_ids"])
+        for sub in node["subfolders"].values():
+            collect_ids(sub)
+    for space in spaces.values():
+        collect_ids(space)
+
     colors = ["#4B9EFF", "#FF6B6B", "#50C878", "#FF8C00", "#9370DB", "#20B2AA"]
     total_imported = 0
     total_errors = 0
@@ -1311,7 +1332,7 @@ def main():
     progress.summary()
 
     # Phase 5: Update DB
-    update_db(state, thread_data_map, user_names, author_mapping)
+    update_db(state, thread_data_map, user_names, author_mapping, current_run_ids)
 
     save_state(state)
     print(f"\n{'='*50}")
