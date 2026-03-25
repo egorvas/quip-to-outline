@@ -410,13 +410,16 @@ def walk_quip_folders(state):
         return cached
 
     user = quip_get("users/current")
+    user_name = user.get("name", "")
     root_ids = user.get("shared_folder_ids", []) + user.get("group_folder_ids", [])
-    # Include private and desktop folders
+    # Track which folders are private/desktop
+    private_folder_ids = set()
     for key in ("private_folder_id", "desktop_folder_id"):
         fid = user.get(key)
         if fid and fid not in root_ids:
             root_ids.append(fid)
-    print(f"  Root folders: {len(root_ids)}")
+            private_folder_ids.add(fid)
+    print(f"  Root folders: {len(root_ids)} ({len(private_folder_ids)} personal)")
 
     all_threads = {}   # thread_id -> {title, created_usec, updated_usec, author_id}
     tree = {}          # folder_id -> {title, thread_ids, subfolders: {folder_id: ...}}
@@ -458,6 +461,12 @@ def walk_quip_folders(state):
     for fid in root_ids:
         node = walk(fid)
         if node:
+            # Tag personal folders with owner info
+            if fid in private_folder_ids:
+                node["owner"] = user_name
+                # Rename to "Title — Owner Name"
+                if user_name and user_name not in node["title"]:
+                    node["title"] = f"{node['title']} — {user_name}"
             spaces[fid] = node
 
     # Count totals
@@ -1294,11 +1303,24 @@ def main():
             state["collections"][fid] = coll_id
             print(f"  Created collection: {coll_id}")
 
-        # Set collection permissions from Quip folder members
+        # Set collection permissions
         if not OPT_NO_PERMISSIONS:
-            granted = sync_collection_permissions(coll_id, space, user_names, author_mapping)
-            if granted:
-                print(f"  Permissions: {granted} users granted access")
+            owner = space.get("owner")
+            if owner:
+                # Personal folder — grant access only to owner
+                outline_uid = author_mapping.get(owner)
+                if outline_uid:
+                    try:
+                        outline_post("collections.add_user", {
+                            "id": coll_id, "userId": outline_uid, "permission": "read_write",
+                        })
+                        print(f"  Permissions: personal ({owner})")
+                    except Exception:
+                        pass
+            else:
+                granted = sync_collection_permissions(coll_id, space, user_names, author_mapping)
+                if granted:
+                    print(f"  Permissions: {granted} users granted access")
 
         # Import top-level threads (directly in space, no parent folder)
         for tid in space["thread_ids"]:
