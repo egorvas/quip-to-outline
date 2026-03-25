@@ -124,8 +124,8 @@ def setup_globals(cfg):
     QUIP_CONCURRENCY = cfg.get("quip_concurrency", 5)
     BLOB_CONCURRENCY = cfg.get("blob_concurrency", 8)
 
-    # DB is optional — enabled only if db_password is set and psycopg2 available
-    if cfg.get("db_password"):
+    # DB is optional — enabled only if db_host is set and psycopg2 available
+    if cfg.get("db_host"):
         if not HAS_PSYCOPG2:
             print("Warning: db configured but psycopg2 not installed. DB features disabled.")
             print("  Install: pip install psycopg2-binary")

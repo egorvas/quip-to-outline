@@ -85,10 +85,10 @@ Edit `config.json` with required fields:
 | `quip_api_token` | Yes | Quip API token (https://quip.com/dev/token) |
 | `quip_concurrency` | No | Max parallel Quip API requests (default: 5) |
 | `blob_concurrency` | No | Max parallel image/file downloads (default: 8) |
-| `db_host` | No | PostgreSQL host — enables timestamp/author DB updates |
+| `db_host` | No | PostgreSQL host — **if set, enables DB features** |
 | `db_port` | No | PostgreSQL port (default: 5432) |
 | `db_user` | No | PostgreSQL user (default: outline) |
-| `db_password` | No | PostgreSQL password — **if empty, DB features disabled** |
+| `db_password` | No | PostgreSQL password (can be empty if no auth) |
 | `db_name` | No | PostgreSQL database name (default: outline) |
 
 Without database configuration, the script still imports all documents, comments, and creates users — but original Quip timestamps and author attribution in the DB won't be set.
