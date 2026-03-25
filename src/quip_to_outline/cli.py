@@ -1762,34 +1762,53 @@ def cmd_retry():
 
 
 def _delete_via_db(doc_ids, collection_ids):
-    """Fallback: delete documents and collections directly via DB."""
+    """Delete documents and collections directly via DB."""
     if not DB_ENABLED:
-        print("  Warning: API delete failed and no DB configured. Some items may remain.")
+        print("  Error: no database configured. Add db_host to config.json.")
         return 0, 0
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
-    docs_deleted = 0
-    for doc_id in doc_ids:
+
+    # Batch delete all related data for documents
+    if doc_ids:
+        # Use IN clause for bulk delete
+        ids_tuple = tuple(doc_ids)
+        placeholder = ','.join(['%s'] * len(ids_tuple))
+        for table in ('comments', 'revisions', 'events', 'subscriptions', 'views'):
+            try:
+                cur.execute(f'DELETE FROM {table} WHERE "documentId" IN ({placeholder})', ids_tuple)
+            except Exception:
+                conn.rollback()
         try:
-            cur.execute('DELETE FROM comments WHERE "documentId" = %s::uuid', (doc_id,))
-            cur.execute('DELETE FROM revisions WHERE "documentId" = %s::uuid', (doc_id,))
-            cur.execute('DELETE FROM events WHERE "documentId" = %s::uuid', (doc_id,))
-            cur.execute('DELETE FROM subscriptions WHERE "documentId" = %s::uuid', (doc_id,))
-            cur.execute('DELETE FROM views WHERE "documentId" = %s::uuid', (doc_id,))
-            cur.execute('DELETE FROM documents WHERE id = %s::uuid', (doc_id,))
-            docs_deleted += 1
+            cur.execute(f'DELETE FROM documents WHERE id IN ({placeholder})', ids_tuple)
+            docs_deleted = cur.rowcount
         except Exception:
             conn.rollback()
+            docs_deleted = 0
+        print(f"  Deleted {docs_deleted} documents")
+    else:
+        docs_deleted = 0
+
+    # Batch delete collections
     colls_deleted = 0
-    for coll_id in collection_ids:
+    if collection_ids:
+        ids_tuple = tuple(collection_ids)
+        placeholder = ','.join(['%s'] * len(ids_tuple))
+        for table in ('collection_users', 'subscriptions', 'events'):
+            try:
+                if table in ('subscriptions', 'events'):
+                    cur.execute(f'DELETE FROM {table} WHERE "collectionId" IN ({placeholder})', ids_tuple)
+                else:
+                    cur.execute(f'DELETE FROM {table} WHERE "collectionId" IN ({placeholder})', ids_tuple)
+            except Exception:
+                conn.rollback()
         try:
-            cur.execute('DELETE FROM collection_users WHERE "collectionId" = %s::uuid', (coll_id,))
-            cur.execute('DELETE FROM subscriptions WHERE "collectionId" = %s::uuid', (coll_id,))
-            cur.execute('DELETE FROM events WHERE "collectionId" = %s::uuid', (coll_id,))
-            cur.execute('DELETE FROM collections WHERE id = %s::uuid', (coll_id,))
-            colls_deleted += 1
+            cur.execute(f'DELETE FROM collections WHERE id IN ({placeholder})', ids_tuple)
+            colls_deleted = cur.rowcount
         except Exception:
             conn.rollback()
+        print(f"  Deleted {colls_deleted} collections")
+
     conn.commit()
     conn.close()
     return docs_deleted, colls_deleted
