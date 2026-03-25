@@ -1320,38 +1320,36 @@ def main():
 
 def print_help():
     print("""
-Usage: quip-to-outline [options]
+Usage: quip-to-outline [command] [options]
 
 Commands:
   --init              Generate config.json template
+  --list              Show Quip folder tree without importing
+  --status            Show migration progress from state.json
+  --dryRun            Simulate migration, show what would be done
+  --verify            Compare Quip vs Outline, report mismatches
+  --retry             Re-import only previously failed documents
+  --cleanup           Delete everything created by this script
   --help              Show this help
 
 Options:
   --config PATH       Path to config.json (default: ./config.json)
-                      All files (state, mapping) stored next to config
   --noComments        Skip comment migration
   --noPermissions     Skip permission sync (collection access)
   --noAttachments     Skip image/file downloads (text only)
   --noUsers           Skip user creation (implies --noPermissions)
-                      Comments will include author name + timestamp in text
   --resetCache        Clear cached Quip data, re-fetch everything
-                      Import progress (already imported docs) is preserved
-  --folders a,b,c     Only migrate specified folders (comma-separated names)
-  --noFolders a,b,c   Exclude specified folders from migration
-                      Filters applied on cached tree; no extra API calls
-
-Workflow:
-  1. quip-to-outline --init
-  2. Edit config.json with credentials
-  3. quip-to-outline [options]
+  --folders a,b,c     Only migrate specified folders
+  --noFolders a,b,c   Exclude specified folders
 
 Examples:
+  quip-to-outline --init                             Setup
+  quip-to-outline --list                             Preview folders
+  quip-to-outline --dryRun                           Preview what will be imported
   quip-to-outline                                    Full migration
-  quip-to-outline --config ~/migration/config.json   Custom config path
-  quip-to-outline --noAttachments                    Text only, no images
-  quip-to-outline --noUsers --noComments             Minimal: docs only
-
-Resume: safe to re-run, skips already imported documents (state.json).
+  quip-to-outline --verify                           Check results
+  quip-to-outline --retry                            Retry failed docs
+  quip-to-outline --cleanup                          Remove everything from Outline
 """)
 
 
@@ -1406,12 +1404,353 @@ def parse_flags():
         print(f"Mode: {', '.join(flags)}")
 
 
+def cmd_list():
+    """Show Quip folder tree without importing."""
+    state = load_state()
+    if "cache" not in state:
+        state["cache"] = {"spaces": None, "thread_data": None, "user_names": None}
+    spaces = walk_quip_folders(state)
+    if not spaces:
+        print("No folders found.")
+        return
+
+    def print_tree(node, indent=0):
+        prefix = "  " * indent
+        thread_count = len(node["thread_ids"])
+        members = len(node.get("member_ids", []))
+        extras = []
+        if thread_count:
+            extras.append(f"{thread_count} docs")
+        if members:
+            extras.append(f"{members} members")
+        extra_str = f" ({', '.join(extras)})" if extras else ""
+        print(f"{prefix}{node['title']}/{extra_str}")
+        for sub in node["subfolders"].values():
+            print_tree(sub, indent + 1)
+
+    for space in spaces.values():
+        print_tree(space)
+
+
+def cmd_status():
+    """Show migration progress from state.json."""
+    state = load_state()
+    imported = state.get("imported_threads", {})
+    collections = state.get("collections", {})
+    folder_docs = state.get("folder_docs", {})
+    cache = state.get("cache", {})
+
+    print(f"State file: {STATE_FILE}")
+    print(f"\n  Imported documents: {len(imported)}")
+    print(f"  Collections created: {len(collections)}")
+    print(f"  Folder docs created: {len(folder_docs)}")
+
+    # Count comments
+    total_comments = sum(len(info.get("comments", [])) for info in imported.values())
+    print(f"  Comments created: {total_comments}")
+
+    # Cache status
+    has_spaces = cache.get("spaces") is not None
+    has_threads = len(cache.get("thread_data") or {})
+    has_users = len(cache.get("user_names") or {})
+    print(f"\n  Cache:")
+    print(f"    Folder tree: {'yes' if has_spaces else 'no'}")
+    print(f"    Thread metadata: {has_threads} threads")
+    print(f"    User names: {has_users} users")
+
+    # Errors (threads in cache but not imported)
+    if has_spaces and cache.get("thread_data"):
+        all_cached = set(cache["thread_data"].keys())
+        all_imported = set(imported.keys())
+        not_imported = all_cached - all_imported
+        if not_imported:
+            print(f"\n  Not yet imported: {len(not_imported)}")
+            for tid in list(not_imported)[:10]:
+                title = cache["thread_data"][tid].get("title", tid)
+                print(f"    - {title}")
+            if len(not_imported) > 10:
+                print(f"    ... and {len(not_imported) - 10} more")
+
+    # Mapping
+    if os.path.exists(MAPPING_FILE):
+        mapping = load_mapping()
+        mapped = sum(1 for v in mapping.values() if v)
+        print(f"\n  Author mapping: {len(mapping)} authors, {mapped} mapped")
+
+
+def cmd_dry_run():
+    """Simulate migration, show what would be done."""
+    state = load_state()
+    if "cache" not in state:
+        state["cache"] = {"spaces": None, "thread_data": None, "user_names": None}
+
+    spaces = walk_quip_folders(state)
+    if not spaces:
+        print("No folders found.")
+        return
+
+    if OPT_FOLDERS:
+        spaces = filter_spaces(spaces, OPT_FOLDERS)
+    if OPT_NO_FOLDERS:
+        spaces = exclude_spaces(spaces, OPT_NO_FOLDERS)
+    if not spaces:
+        print("No folders after filtering.")
+        return
+
+    # Count threads
+    imported = set(state.get("imported_threads", {}).keys())
+
+    def count(node):
+        total = 0
+        new = 0
+        for tid in node["thread_ids"]:
+            total += 1
+            if tid not in imported:
+                new += 1
+        for sub in node["subfolders"].values():
+            st, sn = count(sub)
+            total += st
+            new += sn
+        return total, new
+
+    print("\n  Dry run summary:")
+    print(f"  {'Folder':<30} {'Total':>8} {'New':>8} {'Skip':>8}")
+    print(f"  {'-'*30} {'-'*8} {'-'*8} {'-'*8}")
+    grand_total = 0
+    grand_new = 0
+    for space in spaces.values():
+        for sub in space["subfolders"].values():
+            t, n = count(sub)
+            skip = t - n
+            print(f"  {sub['title']:<30} {t:>8} {n:>8} {skip:>8}")
+            grand_total += t
+            grand_new += n
+        # Top-level threads
+        t_root = len(space["thread_ids"])
+        n_root = sum(1 for tid in space["thread_ids"] if tid not in imported)
+        if t_root:
+            print(f"  {'(root docs)':<30} {t_root:>8} {n_root:>8} {t_root - n_root:>8}")
+            grand_total += t_root
+            grand_new += n_root
+
+    print(f"  {'-'*30} {'-'*8} {'-'*8} {'-'*8}")
+    print(f"  {'TOTAL':<30} {grand_total:>8} {grand_new:>8} {grand_total - grand_new:>8}")
+
+    if not OPT_NO_COMMENTS:
+        print(f"\n  Comments: will fetch messages for {grand_new} new documents")
+    else:
+        print(f"\n  Comments: skipped (--noComments)")
+    if not OPT_NO_ATTACHMENTS:
+        print(f"  Attachments: will download images for {grand_new} new documents")
+    else:
+        print(f"  Attachments: skipped (--noAttachments)")
+    if not OPT_NO_USERS:
+        print(f"  Users: will create/match Outline users from Quip authors")
+    else:
+        print(f"  Users: skipped (--noUsers)")
+
+
+def cmd_verify():
+    """Compare Quip vs Outline, report mismatches."""
+    state = load_state()
+    if "cache" not in state:
+        state["cache"] = {"spaces": None, "thread_data": None, "user_names": None}
+
+    spaces = walk_quip_folders(state)
+    if not spaces:
+        print("No folders found.")
+        return
+
+    # Count Quip threads
+    quip_ids = set()
+    def collect(node):
+        quip_ids.update(node["thread_ids"])
+        for sub in node["subfolders"].values():
+            collect(sub)
+    for space in spaces.values():
+        collect(space)
+
+    imported = state.get("imported_threads", {})
+    imported_ids = set(imported.keys())
+
+    # Compare
+    in_quip_only = quip_ids - imported_ids
+    in_outline_only = imported_ids - quip_ids
+
+    print(f"\n  Quip threads:       {len(quip_ids)}")
+    print(f"  Imported to Outline: {len(imported_ids)}")
+    print(f"  Match:              {len(quip_ids & imported_ids)}")
+
+    if in_quip_only:
+        print(f"\n  Missing in Outline ({len(in_quip_only)}):")
+        cache = state.get("cache", {}).get("thread_data") or {}
+        for tid in sorted(in_quip_only):
+            title = cache.get(tid, {}).get("title", tid)
+            print(f"    - {title}")
+
+    if in_outline_only:
+        print(f"\n  In Outline but not in Quip tree ({len(in_outline_only)}):")
+        for tid in sorted(in_outline_only):
+            title = imported[tid].get("title", tid)
+            print(f"    - {title}")
+
+    if not in_quip_only and not in_outline_only:
+        print("\n  All documents match!")
+
+    # Verify docs exist in Outline API
+    print(f"\n  Checking Outline API...")
+    missing_in_api = []
+    result = outline_post("documents.list", {"limit": 100, "offset": 0})
+    outline_doc_ids = set()
+    offset = 0
+    while True:
+        result = outline_post("documents.list", {"limit": 100, "offset": offset})
+        batch = result.get("data", [])
+        for d in batch:
+            outline_doc_ids.add(d["id"])
+        if len(batch) < 100:
+            break
+        offset += 100
+
+    for tid, info in imported.items():
+        doc_id = info.get("doc_id")
+        if doc_id and doc_id not in outline_doc_ids:
+            missing_in_api.append(info.get("title", tid))
+
+    if missing_in_api:
+        print(f"  Docs in state but deleted from Outline ({len(missing_in_api)}):")
+        for t in missing_in_api:
+            print(f"    - {t}")
+    else:
+        print(f"  All {len(imported)} imported docs exist in Outline")
+
+
+def cmd_retry():
+    """Re-import only previously failed documents."""
+    state = load_state()
+    if "cache" not in state or not state["cache"].get("spaces"):
+        print("No cached data. Run a normal migration first.")
+        return
+
+    spaces = state["cache"]["spaces"]
+    imported = set(state.get("imported_threads", {}).keys())
+    cached_threads = state.get("cache", {}).get("thread_data") or {}
+
+    # Find threads that are cached but not imported
+    all_ids = set()
+    def collect(node):
+        all_ids.update(node["thread_ids"])
+        for sub in node["subfolders"].values():
+            collect(sub)
+    for space in spaces.values():
+        collect(space)
+
+    failed_ids = (all_ids - imported) & set(cached_threads.keys())
+    if not failed_ids:
+        print("No failed documents to retry.")
+        return
+
+    print(f"Retrying {len(failed_ids)} failed documents...")
+
+    # Remove failed from cached thread_data so they get re-fetched with HTML
+    for tid in failed_ids:
+        if tid in cached_threads:
+            del cached_threads[tid]
+    state["cache"]["thread_data"] = cached_threads
+    save_state(state)
+
+    # Run normal migration — it will pick up only non-imported threads
+    main()
+
+
+def cmd_cleanup():
+    """Delete everything created by this script from Outline."""
+    state = load_state()
+    imported = state.get("imported_threads", {})
+    collections = state.get("collections", {})
+
+    if not imported and not collections:
+        print("Nothing to clean up (state is empty).")
+        return
+
+    print(f"This will delete from Outline:")
+    print(f"  {len(imported)} documents (with their comments)")
+    print(f"  {len(collections)} collections")
+    resp = input("\nProceed? (yes/no): ").strip().lower()
+    if resp not in ("yes", "y"):
+        print("Aborted.")
+        return
+
+    # Delete documents (this also deletes their comments)
+    deleted_docs = 0
+    for tid, info in imported.items():
+        doc_id = info.get("doc_id")
+        if not doc_id:
+            continue
+        try:
+            outline_post("documents.delete", {"id": doc_id, "permanent": True})
+            deleted_docs += 1
+        except Exception:
+            pass
+
+    # Delete folder docs
+    for key, doc_id in state.get("folder_docs", {}).items():
+        try:
+            outline_post("documents.delete", {"id": doc_id, "permanent": True})
+        except Exception:
+            pass
+
+    # Delete collections
+    deleted_colls = 0
+    for fid, coll_id in collections.items():
+        try:
+            outline_post("collections.delete", {"id": coll_id})
+            deleted_colls += 1
+        except Exception:
+            pass
+
+    print(f"\n  Deleted {deleted_docs} documents, {deleted_colls} collections")
+
+    # Reset state but keep cache
+    cache = state.get("cache")
+    new = new_state()
+    new["cache"] = cache
+    save_state(new)
+    print(f"  State reset (cache preserved)")
+
+
 def cli_main():
     """Entry point for the CLI."""
-    if "--help" in sys.argv or "-h" in sys.argv:
+    args_lower = [a.lower() for a in sys.argv]
+
+    if "--help" in args_lower or "-h" in args_lower:
         print_help()
-    elif "--init" in sys.argv:
+    elif "--init" in args_lower:
         init_config()
+    elif "--list" in args_lower:
+        cfg = load_config()
+        setup_globals(cfg)
+        cmd_list()
+    elif "--status" in args_lower:
+        cmd_status()
+    elif "--dryrun" in args_lower:
+        cfg = load_config()
+        setup_globals(cfg)
+        parse_flags()
+        cmd_dry_run()
+    elif "--verify" in args_lower:
+        cfg = load_config()
+        setup_globals(cfg)
+        cmd_verify()
+    elif "--retry" in args_lower:
+        cfg = load_config()
+        setup_globals(cfg)
+        parse_flags()
+        cmd_retry()
+    elif "--cleanup" in args_lower:
+        cfg = load_config()
+        setup_globals(cfg)
+        cmd_cleanup()
     else:
         cfg = load_config()
         setup_globals(cfg)
