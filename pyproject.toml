@@ -21,10 +21,9 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: System :: Systems Administration",
 ]
-dependencies = []
-
-[project.optional-dependencies]
-db = ["psycopg2-binary>=2.9"]
+dependencies = [
+    "psycopg2-binary>=2.9",
+]
 
 [project.scripts]
 quip-to-outline = "quip_to_outline.cli:cli_main"

@@ -27,12 +27,6 @@ Direct migration from Quip to self-hosted Outline wiki via API. No intermediate 
 pip install git+https://github.com/egorvas/quip-to-outline.git
 ```
 
-With database support (for timestamp/author updates in Outline DB):
-
-```bash
-pip install "quip-to-outline[db] @ git+https://github.com/egorvas/quip-to-outline.git"
-```
-
 Or with pipx:
 
 ```bash
