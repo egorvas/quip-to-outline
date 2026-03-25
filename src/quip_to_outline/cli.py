@@ -411,6 +411,11 @@ def walk_quip_folders(state):
 
     user = quip_get("users/current")
     root_ids = user.get("shared_folder_ids", []) + user.get("group_folder_ids", [])
+    # Include private and desktop folders
+    for key in ("private_folder_id", "desktop_folder_id"):
+        fid = user.get(key)
+        if fid and fid not in root_ids:
+            root_ids.append(fid)
     print(f"  Root folders: {len(root_ids)}")
 
     all_threads = {}   # thread_id -> {title, created_usec, updated_usec, author_id}
