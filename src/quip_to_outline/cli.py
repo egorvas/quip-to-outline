@@ -1491,6 +1491,8 @@ Options:
   --noFolders a,b,c   Exclude specified folders
   --private           Include personal Private folder
   --desktop           Include personal Desktop folder
+  --fixUpdated=N      Fix stale updated_at: if updated-created > N days
+                      and doc older than N days, reset updated_at = created_at
 
 Examples:
   quip-to-outline --init                             Setup
