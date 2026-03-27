@@ -191,7 +191,7 @@ def new_state():
 def save_state(state):
     tmp = STATE_FILE + ".tmp"
     with open(tmp, 'w') as f:
-        json.dump(state, f, indent=2)
+        json.dump(state, f, indent=2, ensure_ascii=False)
     os.replace(tmp, STATE_FILE)
 
 
