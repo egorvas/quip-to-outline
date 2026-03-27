@@ -1929,12 +1929,13 @@ def cmd_cleanup():
     deleted_docs, deleted_colls = _delete_via_db(all_doc_ids, all_coll_ids)
     print(f"\n  Deleted {deleted_docs} documents, {deleted_colls} collections")
 
-    # Reset state but keep cache
-    cache = state.get("cache")
-    new = new_state()
-    new["cache"] = cache
-    save_state(new)
-    print(f"  State reset (cache preserved)")
+    # Reset state and clear all caches
+    save_state(new_state())
+    import shutil
+    for cache_dir in (HTML_CACHE_DIR, BLOB_CACHE_DIR):
+        if os.path.isdir(cache_dir):
+            shutil.rmtree(cache_dir)
+    print(f"  State and caches cleared")
 
 
 def cmd_remove():
