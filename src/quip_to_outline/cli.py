@@ -79,6 +79,8 @@ def _resolve_work_dir():
 WORK_DIR, CONFIG_FILE = _resolve_work_dir()
 STATE_FILE = os.path.join(WORK_DIR, "state.json")
 MAPPING_FILE = os.path.join(WORK_DIR, "author_mapping.json")
+HTML_CACHE_DIR = os.path.join(WORK_DIR, "html_cache")
+BLOB_CACHE_DIR = os.path.join(WORK_DIR, "blob_cache")
 
 CONFIG_TEMPLATE = {
     "outline_url": "http://localhost:3000",
@@ -112,6 +114,7 @@ OPT_FOLDERS = None      # None = all, or set of folder names to include
 OPT_NO_FOLDERS = None   # None = none excluded, or set of folder names to exclude
 OPT_INCLUDE_PRIVATE = False
 OPT_INCLUDE_DESKTOP = False
+OPT_FIX_UPDATED_DAYS = 0  # 0 = disabled
 
 
 def load_config():
@@ -316,7 +319,22 @@ def quip_get(endpoint, retries=5):
 
 
 def quip_get_blob(thread_id, blob_id):
-    """Download blob bytes from Quip. Returns (bytes, content_type) or None."""
+    """Download blob bytes from Quip (with local cache). Returns (bytes, content_type) or None."""
+    os.makedirs(BLOB_CACHE_DIR, exist_ok=True)
+    cache_path = os.path.join(BLOB_CACHE_DIR, f"{thread_id}_{blob_id}")
+    meta_path = cache_path + ".meta"
+
+    # Check cache
+    if os.path.exists(cache_path) and os.path.exists(meta_path):
+        try:
+            with open(meta_path) as f:
+                ct = f.read().strip()
+            with open(cache_path, "rb") as f:
+                return f.read(), ct
+        except Exception:
+            pass
+
+    # Fetch from Quip
     url = f"https://platform.quip.com/1/blob/{thread_id}/{blob_id}"
     headers = {"Authorization": f"Bearer {QUIP_TOKEN}"}
     _quip_limiter.wait()
@@ -325,7 +343,13 @@ def quip_get_blob(thread_id, blob_id):
         with urllib.request.urlopen(req, timeout=30) as resp:
             _quip_limiter.update_from_headers(resp.headers)
             ct = resp.headers.get("Content-Type", "application/octet-stream")
-            return resp.read(), ct
+            blob_bytes = resp.read()
+            # Save to cache
+            with open(cache_path, "wb") as f:
+                f.write(blob_bytes)
+            with open(meta_path, "w") as f:
+                f.write(ct)
+            return blob_bytes, ct
     except Exception:
         return None
 
@@ -541,13 +565,36 @@ def fetch_thread_data(spaces, state):
     threads = {}
     author_ids = set()
 
-    # Fetch new threads (metadata + HTML in one batch call)
-    ids_to_fetch = list(new_ids | need_html_ids)
-    if ids_to_fetch:
+    # Load HTML from file cache where available
+    os.makedirs(HTML_CACHE_DIR, exist_ok=True)
+    ids_to_fetch_set = new_ids | need_html_ids
+    cached_html_ids = set()
+    uncached_ids = []
+    for tid in ids_to_fetch_set:
+        cache_path = os.path.join(HTML_CACHE_DIR, f"{tid}.json")
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path) as f:
+                    threads[tid] = json.load(f)
+                if threads[tid].get("author_id"):
+                    author_ids.add(threads[tid]["author_id"])
+                # Also update metadata cache
+                cached_threads[tid] = {k: v for k, v in threads[tid].items() if k != "html"}
+                cached_html_ids.add(tid)
+            except Exception:
+                uncached_ids.append(tid)
+        else:
+            uncached_ids.append(tid)
+
+    if cached_html_ids:
+        print(f"  HTML cache: {len(cached_html_ids)} loaded, {len(uncached_ids)} to fetch")
+
+    # Fetch remaining threads from Quip API
+    if uncached_ids:
         batch_size = 6
-        total_batches = (len(ids_to_fetch) + batch_size - 1) // batch_size
-        for i in range(0, len(ids_to_fetch), batch_size):
-            batch = ids_to_fetch[i:i + batch_size]
+        total_batches = (len(uncached_ids) + batch_size - 1) // batch_size
+        for i in range(0, len(uncached_ids), batch_size):
+            batch = uncached_ids[i:i + batch_size]
             batch_num = i // batch_size + 1
             print(f"\r    Batch {batch_num}/{total_batches} ({len(threads)} fetched)", end="", flush=True)
             try:
@@ -560,15 +607,20 @@ def fetch_thread_data(spaces, state):
                         "updated_usec": t.get("updated_usec"),
                         "author_id": t.get("author_id"),
                     }
-                    threads[tid] = {**meta, "html": tdata.get("html", "")}
+                    thread_info = {**meta, "html": tdata.get("html", "")}
+                    threads[tid] = thread_info
                     # Cache metadata (without html — too large)
                     cached_threads[tid] = meta
                     if t.get("author_id"):
                         author_ids.add(t["author_id"])
+                    # Save HTML to file cache
+                    cache_path = os.path.join(HTML_CACHE_DIR, f"{tid}.json")
+                    with open(cache_path, "w") as f:
+                        json.dump(thread_info, f, ensure_ascii=False)
             except Exception as e:
                 print(f"\n    Warning: batch failed: {e}")
         print()
-    else:
+    elif not cached_html_ids:
         print("  All threads already fetched")
 
     # Add metadata for already-imported threads (for DB update phase)
@@ -838,7 +890,15 @@ def process_thread(thread_id, collection_id, parent_doc_id, thread_data, author_
                     else:
                         html = html.replace(f"/blob/{tid}/{bid}", "#")
 
-        # 4. Wrap in full HTML document for Outline import
+        # 4. Fix HTML tags not supported by Outline's importer
+        #    <pre> code blocks: Outline needs class="code-block"
+        html = re.sub(r"<pre[^>]*>", '<pre class="code-block">', html)
+        #    <tt> (monospace) -> <code> (inline code)
+        html = html.replace("<tt>", "<code>").replace("</tt>", "</code>")
+        #    <h5>/<h6> -> <h4> (Outline only supports h1-h4)
+        html = re.sub(r"<(/?)h[56](?:\s[^>]*)?>", r"<\1h4>", html)
+
+        # 5. Wrap in full HTML document for Outline import
         full_html = f"<html><head><title>{title}</title></head><body>{html}</body></html>"
 
         # 5. Upload to Outline
@@ -1077,6 +1137,15 @@ def update_db(state, thread_meta_map, user_names, author_mapping, current_run_id
 
         created_at = datetime.fromtimestamp(created_usec / 1e6, tz=timezone.utc)
         updated_at = datetime.fromtimestamp(updated_usec / 1e6, tz=timezone.utc)
+
+        # --fixUpdated=Nd: if the gap between updated and created is > N days
+        # and created is older than N days, treat updated as stale → reset to created
+        if OPT_FIX_UPDATED_DAYS > 0:
+            now = datetime.now(tz=timezone.utc)
+            gap = (updated_at - created_at).days
+            age = (now - created_at).days
+            if gap > OPT_FIX_UPDATED_DAYS and age > OPT_FIX_UPDATED_DAYS:
+                updated_at = created_at
 
         # Resolve author
         author_name = meta.get("author_name")
@@ -1433,6 +1502,7 @@ Examples:
 def parse_flags():
     global OPT_NO_COMMENTS, OPT_NO_PERMISSIONS, OPT_NO_ATTACHMENTS, OPT_NO_USERS
     global OPT_FOLDERS, OPT_NO_FOLDERS, OPT_INCLUDE_PRIVATE, OPT_INCLUDE_DESKTOP
+    global OPT_FIX_UPDATED_DAYS
     args_lower = [a.lower() for a in sys.argv]
     OPT_NO_COMMENTS = "--nocomments" in args_lower
     OPT_NO_PERMISSIONS = "--nopermissions" in args_lower
@@ -1457,6 +1527,15 @@ def parse_flags():
 
     OPT_INCLUDE_PRIVATE = "--private" in args_lower
     OPT_INCLUDE_DESKTOP = "--desktop" in args_lower
+
+    # --fixUpdated=N or --fixUpdated=Nd
+    for arg in sys.argv:
+        if arg.lower().startswith("--fixupdated="):
+            try:
+                OPT_FIX_UPDATED_DAYS = int(arg.split("=", 1)[1].rstrip("d"))
+            except ValueError:
+                print(f"Error: invalid --fixUpdated value: {arg}")
+                sys.exit(1)
 
     # Validate: same folder in both is an error
     if OPT_FOLDERS and OPT_NO_FOLDERS:
@@ -1945,7 +2024,7 @@ KNOWN_ARGS = {
     "--help", "-h", "--init", "--list", "--status", "--dryrun", "--verify",
     "--retry", "--cleanup", "--remove", "--config", "--nocomments", "--nopermissions",
     "--noattachments", "--nousers", "--resetcache", "--resettree",
-    "--folders", "--nofolders", "--private", "--desktop",
+    "--folders", "--nofolders", "--private", "--desktop", "--fixupdated",
 }
 
 # Args that take a value after them
@@ -1963,7 +2042,8 @@ def validate_args():
         if arg.lower() in ARGS_WITH_VALUE:
             skip_next = True
             continue
-        if arg.startswith("--") and arg.lower() not in KNOWN_ARGS:
+        arg_name = arg.split("=", 1)[0].lower() if "=" in arg else arg.lower()
+        if arg.startswith("--") and arg_name not in KNOWN_ARGS:
             unknown.append(arg)
     if unknown:
         print(f"Error: unknown argument(s): {', '.join(unknown)}")

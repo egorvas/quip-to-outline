@@ -4,7 +4,8 @@ Direct migration from Quip to self-hosted Outline wiki via API. No intermediate 
 
 ## What it does
 
-- Fetches documents directly from Quip API (no HTML export step needed)
+- Fetches documents directly from Quip API with local caching (HTML and blobs)
+- Fixes Quip HTML for Outline compatibility (code blocks, monospace, headings)
 - Preserves folder hierarchy (Quip spaces -> Outline collections, folders -> parent docs)
 - Downloads images/files with parallel downloads, uploads as Outline attachments
 - Creates comments from Quip Messages API with quoted context text
@@ -179,9 +180,9 @@ quip-to-outline
 Runs through all phases:
 
 1. **Walk Quip folders** — recursively discovers all folders and threads via API
-2. **Fetch thread data** — batch-fetches metadata + HTML for all threads in one pass
+2. **Fetch thread data** — batch-fetches metadata + HTML (cached locally in `html_cache/`)
 3. **Create users** — matches Quip authors to existing Outline users; creates new users for unmatched
-4. **Import documents** — downloads images in parallel, uploads as Outline attachments, imports HTML, creates comments with quoted context
+4. **Import documents** — downloads images in parallel (cached in `blob_cache/`), fixes HTML for Outline, uploads as attachments, imports via API, creates comments
 5. **Update DB** — sets original Quip timestamps and authors (if database configured)
 
 ## Options
@@ -199,6 +200,7 @@ Runs through all phases:
 | `--desktop`         | Include personal Desktop folder (excluded by default).                                  |
 | `--resetTree`       | Clear folder tree cache only, re-walk Quip folders.                                     |
 | `--resetCache`      | Clear all cached Quip data, re-fetch from API. Import progress preserved.               |
+| `--fixUpdated=N`    | Fix stale `updated_at`: if `updated-created > N days` and doc older than N days, reset to `created_at`. |
 
 `--folders` and `--noFolders` can be used together, but the same folder in both is an error.
 
@@ -256,12 +258,14 @@ The script caches Quip API data in `state.json` to minimize API calls on re-run:
 | Folder tree     | Yes    | 0 Quip API calls                 |
 | Thread metadata | Yes    | Only new threads fetched         |
 | User names      | Yes    | Only new users resolved          |
-| Thread HTML     | No     | Fetched for non-imported threads |
+| Thread HTML     | Yes    | File cache in `html_cache/`      |
+| Blob/images     | Yes    | File cache in `blob_cache/`      |
 | Import progress | Yes    | Skips already imported           |
 
 On restart, the script picks up exactly where it left off — no wasted API calls.
 
 - `--resetCache` clears the Quip data cache but preserves import progress
+- Delete `html_cache/` and `blob_cache/` to force re-download from Quip
 - `--folders` / `--noFolders` filter the cached tree — no extra API calls
 - `--status` shows what's cached and what's pending
 - Delete `state.json` entirely to start from scratch
@@ -278,7 +282,7 @@ Quip allows ~50 requests/minute per user and ~600/minute per company. The script
 
 ### Images and attachments
 
-Images referenced in Quip documents are downloaded in parallel (configurable via `blob_concurrency`) and uploaded to Outline as native attachments. The HTML is updated with Outline attachment URLs before import. This avoids bloating documents with base64-encoded images.
+Images referenced in Quip documents are downloaded in parallel (configurable via `blob_concurrency`) and cached locally in `blob_cache/`. On subsequent runs, cached blobs are reused without Quip API calls. Blobs are uploaded to Outline as native attachments, and the HTML is updated with Outline attachment URLs before import.
 
 ### Comments
 
@@ -295,6 +299,8 @@ Quip folder `member_ids` are mapped to Outline collection permissions. All folde
 | `config.json`         | Credentials — **do not share or commit**                |
 | `state.json`          | Migration progress and cache — tracks imported threads  |
 | `author_mapping.json` | Quip author name -> Outline user ID mapping             |
+| `html_cache/`         | Cached Quip thread HTML + metadata (one JSON per thread)|
+| `blob_cache/`         | Cached Quip images/files (binary + `.meta` content-type)|
 
 ## Troubleshooting
 
