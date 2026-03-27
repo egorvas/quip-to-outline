@@ -1475,6 +1475,8 @@ Commands:
   --dryRun            Simulate migration, show what would be done
   --verify            Compare Quip vs Outline, report mismatches
   --retry             Re-import only previously failed documents
+  --updateDb          Re-run DB update phase for all imported docs (timestamps, authors)
+                      Use with --fixUpdated=N to fix dates without re-importing
   --cleanup           Delete everything created by this script
   --remove            Remove specific folders (use with --folders/--noFolders)
   --help              Show this help
@@ -1900,6 +1902,40 @@ def _delete_via_db(doc_ids, collection_ids):
     return docs_deleted, colls_deleted
 
 
+def cmd_update_db():
+    """Re-run update_db phase for all imported documents."""
+    if not DB_ENABLED:
+        print("Error: --updateDb requires database configuration (db_host in config.json).")
+        sys.exit(1)
+
+    state = load_state()
+    imported = state.get("imported_threads", {})
+    if not imported:
+        print("No imported documents in state.")
+        return
+
+    # Load metadata from html_cache
+    thread_meta_map = {}
+    for tid in imported:
+        cache_path = os.path.join(HTML_CACHE_DIR, f"{tid}.json")
+        if os.path.exists(cache_path):
+            with open(cache_path) as f:
+                thread_meta_map[tid] = json.load(f)
+
+    # Load author mapping
+    author_mapping = {}
+    if os.path.exists(MAPPING_FILE):
+        with open(MAPPING_FILE) as f:
+            author_mapping = json.load(f)
+
+    # Load user names from state cache
+    user_names = state.get("cache", {}).get("user_names") or {}
+
+    print(f"Updating DB for {len(imported)} documents (meta available for {len(thread_meta_map)})")
+    update_db(state, thread_meta_map, user_names, author_mapping)
+    save_state(state)
+
+
 def cmd_cleanup():
     """Delete everything created by this script from Outline via DB."""
     if not DB_ENABLED:
@@ -2033,6 +2069,7 @@ KNOWN_ARGS = {
     "--retry", "--cleanup", "--remove", "--config", "--nocomments", "--nopermissions",
     "--noattachments", "--nousers", "--resetcache", "--resettree",
     "--folders", "--nofolders", "--private", "--desktop", "--fixupdated",
+    "--updatedb",
 }
 
 # Args that take a value after them
@@ -2088,6 +2125,11 @@ def cli_main():
         setup_globals(cfg)
         parse_flags()
         cmd_retry()
+    elif "--updatedb" in args_lower:
+        cfg = load_config()
+        setup_globals(cfg)
+        parse_flags()
+        cmd_update_db()
     elif "--cleanup" in args_lower:
         cfg = load_config()
         setup_globals(cfg)
