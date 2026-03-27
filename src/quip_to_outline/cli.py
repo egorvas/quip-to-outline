@@ -1154,9 +1154,14 @@ def update_db(state, thread_meta_map, user_names, author_mapping, current_run_id
         if outline_user_id:
             cur.execute(
                 'UPDATE documents SET "createdAt" = %s, "updatedAt" = %s, '
-                '"createdById" = %s::uuid, "lastModifiedById" = %s::uuid '
+                '"createdById" = %s::uuid, "lastModifiedById" = %s::uuid, '
+                '"collaboratorIds" = ('
+                '  SELECT array_agg(DISTINCT uid) FROM unnest('
+                '    array_cat("collaboratorIds", ARRAY[%s::uuid])'
+                '  ) AS uid'
+                ') '
                 'WHERE id = %s::uuid',
-                (created_at, updated_at, outline_user_id, outline_user_id, doc_id),
+                (created_at, updated_at, outline_user_id, outline_user_id, outline_user_id, doc_id),
             )
         else:
             cur.execute(
