@@ -81,6 +81,7 @@ STATE_FILE = os.path.join(WORK_DIR, "state.json")
 MAPPING_FILE = os.path.join(WORK_DIR, "author_mapping.json")
 HTML_CACHE_DIR = os.path.join(WORK_DIR, "html_cache")
 BLOB_CACHE_DIR = os.path.join(WORK_DIR, "blob_cache")
+MSG_CACHE_DIR = os.path.join(WORK_DIR, "msg_cache")
 
 CONFIG_TEMPLATE = {
     "outline_url": "http://localhost:3000",
@@ -914,7 +915,15 @@ def process_thread(thread_id, collection_id, parent_doc_id, thread_data, author_
         comment_data = []
         if not OPT_NO_COMMENTS:
             try:
-                messages = quip_get(f"messages/{thread_id}")
+                os.makedirs(MSG_CACHE_DIR, exist_ok=True)
+                msg_cache_path = os.path.join(MSG_CACHE_DIR, f"{thread_id}.json")
+                if os.path.exists(msg_cache_path):
+                    with open(msg_cache_path) as f:
+                        messages = json.load(f)
+                else:
+                    messages = quip_get(f"messages/{thread_id}")
+                    with open(msg_cache_path, "w") as f:
+                        json.dump(messages, f, ensure_ascii=False)
                 if messages:
                     messages.sort(key=lambda m: m.get("created_usec", 0))
                     for msg in messages:
@@ -1968,7 +1977,7 @@ def cmd_cleanup():
     # Reset state and clear all caches
     save_state(new_state())
     import shutil
-    for cache_dir in (HTML_CACHE_DIR, BLOB_CACHE_DIR):
+    for cache_dir in (HTML_CACHE_DIR, BLOB_CACHE_DIR, MSG_CACHE_DIR):
         if os.path.isdir(cache_dir):
             shutil.rmtree(cache_dir)
     print(f"  State and caches cleared")
