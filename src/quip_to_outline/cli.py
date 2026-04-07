@@ -116,15 +116,18 @@ OPT_NO_FOLDERS = None   # None = none excluded, or set of folder names to exclud
 OPT_INCLUDE_PRIVATE = False
 OPT_INCLUDE_DESKTOP = False
 OPT_FIX_UPDATED_DAYS = 0  # 0 = disabled
+OPT_PREFETCH = False  # --prefetch: only cache Quip data, no Outline calls
 
 
-def load_config():
+def load_config(require_outline=True):
     if not os.path.exists(CONFIG_FILE):
         print(f"Error: config.json not found. Run: python3 {sys.argv[0]} --init")
         sys.exit(1)
     with open(CONFIG_FILE) as f:
         cfg = json.load(f)
-    required = ["outline_url", "outline_api_token", "quip_api_token"]
+    required = ["quip_api_token"]
+    if require_outline:
+        required = ["outline_url", "outline_api_token"] + required
     missing = [k for k in required if not cfg.get(k)]
     if missing:
         print(f"Error: missing config fields: {', '.join(missing)}")
@@ -134,8 +137,8 @@ def load_config():
 
 def setup_globals(cfg):
     global OUTLINE_URL, OUTLINE_TOKEN, QUIP_TOKEN, DB_CONFIG, DB_ENABLED, QUIP_CONCURRENCY, BLOB_CONCURRENCY
-    OUTLINE_URL = cfg["outline_url"].rstrip("/")
-    OUTLINE_TOKEN = cfg["outline_api_token"]
+    OUTLINE_URL = cfg.get("outline_url", "").rstrip("/")
+    OUTLINE_TOKEN = cfg.get("outline_api_token", "")
     QUIP_TOKEN = cfg["quip_api_token"]
     QUIP_CONCURRENCY = cfg.get("quip_concurrency", 5)
     BLOB_CONCURRENCY = cfg.get("blob_concurrency", 8)
@@ -1480,6 +1483,9 @@ Usage: quip-to-outline [command] [options]
 Commands:
   --init              Generate config.json template
   --list              Show Quip folder tree without importing
+  --prefetch          Download all Quip data into local caches (html, blobs, messages).
+                      No Outline credentials required. Supports --folders/--noFolders,
+                      --noComments, --noAttachments.
   --status            Show migration progress and verify Outline state
   --updateDb          Re-run DB update phase for all imported docs (timestamps, authors)
                       Use with --fixUpdated=N to fix dates without re-importing
@@ -1504,6 +1510,7 @@ Options:
 Examples:
   quip-to-outline --init                             Setup
   quip-to-outline --list                             Preview folders
+  quip-to-outline --prefetch                         Cache everything from Quip (no Outline)
   quip-to-outline                                    Full migration
   quip-to-outline --status                           Check progress and verify
   quip-to-outline --cleanup                          Remove everything from Outline
@@ -1515,7 +1522,7 @@ Examples:
 def parse_flags():
     global OPT_NO_COMMENTS, OPT_NO_PERMISSIONS, OPT_NO_ATTACHMENTS, OPT_NO_USERS
     global OPT_FOLDERS, OPT_NO_FOLDERS, OPT_INCLUDE_PRIVATE, OPT_INCLUDE_DESKTOP
-    global OPT_FIX_UPDATED_DAYS
+    global OPT_FIX_UPDATED_DAYS, OPT_PREFETCH
     args_lower = [a.lower() for a in sys.argv]
     OPT_NO_COMMENTS = "--nocomments" in args_lower
     OPT_NO_PERMISSIONS = "--nopermissions" in args_lower
@@ -1540,6 +1547,7 @@ def parse_flags():
 
     OPT_INCLUDE_PRIVATE = "--private" in args_lower
     OPT_INCLUDE_DESKTOP = "--desktop" in args_lower
+    OPT_PREFETCH = "--prefetch" in args_lower
 
     # --fixUpdated=N or --fixUpdated=Nd
     for arg in sys.argv:
@@ -1567,6 +1575,7 @@ def parse_flags():
     if OPT_NO_FOLDERS:       flags.append(f"noFolders: {','.join(sorted(OPT_NO_FOLDERS))}")
     if OPT_INCLUDE_PRIVATE:  flags.append("private")
     if OPT_INCLUDE_DESKTOP:  flags.append("desktop")
+    if OPT_PREFETCH:         flags.append("prefetch")
     if flags:
         print(f"Mode: {', '.join(flags)}")
 
@@ -1597,6 +1606,98 @@ def cmd_list():
 
     for space in spaces.values():
         print_tree(space)
+
+
+def cmd_prefetch():
+    """Download everything from Quip into local caches. No Outline calls."""
+    state = load_state()
+    if "cache" not in state:
+        state["cache"] = {"spaces": None, "thread_data": None, "user_names": None}
+
+    # Phase 1: folder tree
+    spaces = walk_quip_folders(state)
+    if not spaces:
+        print("No folders found.")
+        return
+
+    if OPT_FOLDERS:
+        spaces = filter_spaces(spaces, OPT_FOLDERS)
+        if not spaces:
+            print(f"No folders matched: {', '.join(OPT_FOLDERS)}")
+            return
+    if OPT_NO_FOLDERS:
+        spaces = exclude_spaces(spaces, OPT_NO_FOLDERS)
+        if not spaces:
+            print("All folders excluded.")
+            return
+
+    # Phase 2: thread metadata + HTML (populates html_cache/)
+    thread_data_map, _user_names = fetch_thread_data(spaces, state)
+
+    # Collect all thread IDs in scope
+    all_tids = []
+    def collect(node):
+        all_tids.extend(node["thread_ids"])
+        for sub in node["subfolders"].values():
+            collect(sub)
+    for sp in spaces.values():
+        collect(sp)
+
+    print("\n" + "=" * 50)
+    print(f"Phase 3: Prefetching blobs and messages for {len(all_tids)} threads")
+    print("=" * 50)
+
+    os.makedirs(MSG_CACHE_DIR, exist_ok=True)
+    os.makedirs(BLOB_CACHE_DIR, exist_ok=True)
+
+    blob_total = 0
+    msg_total = 0
+    for idx, tid in enumerate(all_tids, 1):
+        tdata = thread_data_map.get(tid, {})
+        title = tdata.get("title", tid)
+        html = tdata.get("html", "")
+
+        # Blobs
+        if html and not OPT_NO_ATTACHMENTS:
+            blob_refs = list(dict.fromkeys(re.findall(r'/blob/([^/]+)/([^"\'?\s<>]+)', html)))
+            if blob_refs:
+                with ThreadPoolExecutor(max_workers=BLOB_CONCURRENCY) as pool:
+                    futures = {
+                        pool.submit(quip_get_blob, btid, bid): (btid, bid)
+                        for btid, bid in blob_refs
+                    }
+                    for future in as_completed(futures):
+                        try:
+                            if future.result():
+                                blob_total += 1
+                        except Exception:
+                            pass
+
+        # Messages
+        if not OPT_NO_COMMENTS:
+            msg_cache_path = os.path.join(MSG_CACHE_DIR, f"{tid}.json")
+            if not os.path.exists(msg_cache_path):
+                try:
+                    messages = quip_get(f"messages/{tid}")
+                    with open(msg_cache_path, "w") as f:
+                        json.dump(messages, f, ensure_ascii=False)
+                    if messages:
+                        msg_total += len(messages)
+                except Exception:
+                    pass
+            else:
+                try:
+                    with open(msg_cache_path) as f:
+                        msg_total += len(json.load(f) or [])
+                except Exception:
+                    pass
+
+        print(f"  [{idx}/{len(all_tids)}] {title[:70]}")
+
+    save_state(state)
+    print(f"\n{'='*50}")
+    print(f"Prefetch done. {len(all_tids)} threads, {blob_total} blobs, {msg_total} messages cached.")
+    print(f"Caches: {HTML_CACHE_DIR}, {BLOB_CACHE_DIR}, {MSG_CACHE_DIR}")
 
 
 def cmd_status():
@@ -1848,6 +1949,7 @@ def cmd_cleanup():
 KNOWN_ARGS = {
     "--help", "-h", "--init", "--list", "--status",
     "--cleanup", "--resetcache", "--resetstate", "--updatedb",
+    "--prefetch",
     "--config", "--nocomments", "--nopermissions",
     "--noattachments", "--nousers",
     "--folders", "--nofolders", "--private", "--desktop", "--fixupdated",
@@ -1907,6 +2009,11 @@ def cli_main():
         cfg = load_config()
         setup_globals(cfg)
         cmd_cleanup()
+    elif "--prefetch" in args_lower:
+        cfg = load_config(require_outline=False)
+        setup_globals(cfg)
+        parse_flags()
+        cmd_prefetch()
     else:
         cfg = load_config()
         setup_globals(cfg)

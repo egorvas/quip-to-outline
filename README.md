@@ -49,9 +49,8 @@ Restart Outline, then re-enable after migration.
 quip-to-outline --init          # 1. Generate config.json
 # edit config.json               # 2. Fill in credentials
 quip-to-outline --list          # 3. Preview Quip folders
-quip-to-outline --dryRun        # 4. See what will be imported
-quip-to-outline                 # 5. Run migration
-quip-to-outline --verify        # 6. Check results
+quip-to-outline                 # 4. Run migration
+quip-to-outline --status        # 5. Check results
 ```
 
 ## Configuration
@@ -109,6 +108,8 @@ quip-to-outline --config ~/migration/config.json --init   # custom path
 
 Without database configuration, the script imports all documents, comments, and creates users — but original Quip timestamps and author attribution won't be set.
 
+For `--prefetch` mode only `quip_api_token` is required; `outline_url` and `outline_api_token` can be left empty.
+
 ## Commands
 
 ### `--init` — Generate config template
@@ -127,14 +128,14 @@ quip-to-outline --list
 
 Shows the Quip folder tree without importing anything. Useful for choosing folders for `--folders` / `--noFolders`.
 
-### `--dryRun` — Simulate migration
+### `--prefetch` — Download everything from Quip without importing
 
 ```bash
-quip-to-outline --dryRun
-quip-to-outline --dryRun --folders devOps,kosAccess
+quip-to-outline --prefetch
+quip-to-outline --prefetch --folders devOps,kosAccess
 ```
 
-Shows a breakdown of what would be imported: documents per folder, how many are new vs already imported, which features are enabled.
+Populates local caches (`html_cache/`, `blob_cache/`, `msg_cache/`) with all Quip data but does not touch Outline. Outline credentials are not required — only `quip_api_token` must be set in config. Supports `--folders` / `--noFolders` / `--noComments` / `--noAttachments` / `--private` / `--desktop`. Safe to re-run — only missing data is fetched.
 
 ### `--status` — Show migration progress
 
@@ -142,26 +143,16 @@ Shows a breakdown of what would be imported: documents per folder, how many are 
 quip-to-outline --status
 ```
 
-Shows current state: imported documents, comments, collections, cache status, unmapped authors, and any documents not yet imported.
+Shows current state: imported documents, comments, collections, cache status, unmapped authors, and any documents not yet imported. Also verifies Outline side.
 
-### `--verify` — Validate migration
-
-```bash
-quip-to-outline --verify
-```
-
-Compares Quip threads vs Outline documents and reports:
-- Documents in Quip but missing in Outline
-- Documents in Outline state but deleted from Outline
-- Total match count
-
-### `--retry` — Re-import failed documents
+### `--updateDb` — Re-run DB update phase
 
 ```bash
-quip-to-outline --retry
+quip-to-outline --updateDb
+quip-to-outline --updateDb --fixUpdated=90
 ```
 
-Clears cached data for documents that failed in a previous run and re-imports only those. Requires a previous run with cached data.
+Re-runs only the database update phase (timestamps and authors) for all imported docs, without re-importing. Requires database configuration. Combine with `--fixUpdated=N` to fix stale `updated_at` without touching Outline API.
 
 ### `--cleanup` — Remove everything from Outline
 
@@ -169,7 +160,23 @@ Clears cached data for documents that failed in a previous run and re-imports on
 quip-to-outline --cleanup
 ```
 
-Deletes all documents, collections, and folder docs created by the script (tracked in `state.json`). Asks for confirmation. Preserves cache so you can re-import without re-fetching from Quip.
+Deletes all documents, collections, and folder docs created by the script (tracked in `state.json`). Asks for confirmation. Also clears all local caches.
+
+### `--resetCache` — Clear local caches
+
+```bash
+quip-to-outline --resetCache
+```
+
+Clears `html_cache/`, `blob_cache/`, `msg_cache/` and the in-state cache (folder tree, thread metadata, user names). Preserves import progress.
+
+### `--resetState` — Reset import progress
+
+```bash
+quip-to-outline --resetState
+```
+
+Resets import progress (imported threads, collections, folder docs) but keeps all caches. Useful for re-importing the same Quip content into a fresh Outline instance without re-fetching from Quip.
 
 ### (default) — Run migration
 
@@ -187,20 +194,18 @@ Runs through all phases:
 
 ## Options
 
-| Option              | Description                                                                             |
-| ------------------- | --------------------------------------------------------------------------------------- |
-| `--config PATH`     | Path to config.json (default: `./config.json`). All files stored next to config.        |
-| `--noComments`      | Skip comment migration. Saves 1 Quip API request per document.                         |
-| `--noAttachments`   | Skip image/file downloads. Text-only import, much faster.                               |
-| `--noUsers`         | Skip user creation. Implies `--noPermissions`. All content attributed to admin.         |
-| `--noPermissions`   | Skip permission sync. Collections accessible to everyone.                               |
-| `--folders a,b,c`   | Only migrate specified folders (comma-separated names).                                 |
-| `--noFolders a,b,c` | Exclude specified folders from migration.                                               |
-| `--private`         | Include personal Private folder (excluded by default).                                  |
-| `--desktop`         | Include personal Desktop folder (excluded by default).                                  |
-| `--resetTree`       | Clear folder tree cache only, re-walk Quip folders.                                     |
-| `--resetCache`      | Clear all cached Quip data, re-fetch from API. Import progress preserved.               |
-| `--fixUpdated=N`    | Fix stale `updated_at`: if `updated-created > N days` and doc older than N days, reset to `created_at`. |
+| Option              | Description                                                                                                       |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `--config PATH`     | Path to config.json (default: `./config.json`). All files stored next to config.                                  |
+| `--noComments`      | Skip comment migration. Saves 1 Quip API request per document.                                                    |
+| `--noAttachments`   | Skip image/file downloads. Text-only import, much faster.                                                         |
+| `--noUsers`         | Skip user creation. Implies `--noPermissions`. All content attributed to admin.                                   |
+| `--noPermissions`   | Skip permission sync. Collections accessible to everyone.                                                         |
+| `--folders a,b,c`   | Only migrate specified folders (comma-separated names).                                                           |
+| `--noFolders a,b,c` | Exclude specified folders from migration.                                                                         |
+| `--private`         | Include personal Private folder (excluded by default).                                                            |
+| `--desktop`         | Include personal Desktop folder (excluded by default).                                                            |
+| `--fixUpdated=N`    | Fix stale `updated_at`: if `updated-created > N days`, reset `updated_at` to `created_at`. Used with `--updateDb`.|
 
 `--folders` and `--noFolders` can be used together, but the same folder in both is an error.
 
@@ -238,15 +243,19 @@ quip-to-outline --private --desktop
 # Re-fetch after new docs added in Quip
 quip-to-outline --resetCache
 
-# Check what will be imported before running
-quip-to-outline --dryRun --folders kosAccess
+# Cache everything from Quip without importing (no Outline creds needed)
+quip-to-outline --prefetch
 
-# Retry only failed documents
-quip-to-outline --retry
+# Re-import into a fresh Outline without re-fetching from Quip
+quip-to-outline --resetState
+quip-to-outline
 
-# Start over: remove from Outline, re-import
+# Start over: remove from Outline, clear caches, re-import
 quip-to-outline --cleanup
 quip-to-outline
+
+# Fix stale updated_at dates without re-importing
+quip-to-outline --updateDb --fixUpdated=90
 ```
 
 ## Caching and resume
@@ -260,15 +269,17 @@ The script caches Quip API data in `state.json` to minimize API calls on re-run:
 | User names      | Yes    | Only new users resolved          |
 | Thread HTML     | Yes    | File cache in `html_cache/`      |
 | Blob/images     | Yes    | File cache in `blob_cache/`      |
+| Comments        | Yes    | File cache in `msg_cache/`       |
 | Import progress | Yes    | Skips already imported           |
 
 On restart, the script picks up exactly where it left off — no wasted API calls.
 
 - `--resetCache` clears the Quip data cache but preserves import progress
-- Delete `html_cache/` and `blob_cache/` to force re-download from Quip
+- `--resetState` clears import progress but keeps the cache — useful for re-importing into a fresh Outline
+- Delete `html_cache/`, `blob_cache/`, `msg_cache/` to force re-download from Quip
 - `--folders` / `--noFolders` filter the cached tree — no extra API calls
 - `--status` shows what's cached and what's pending
-- Delete `state.json` entirely to start from scratch
+- `--prefetch` downloads everything without touching Outline
 
 ## How it works
 
@@ -301,6 +312,7 @@ Quip folder `member_ids` are mapped to Outline collection permissions. All folde
 | `author_mapping.json` | Quip author name -> Outline user ID mapping             |
 | `html_cache/`         | Cached Quip thread HTML + metadata (one JSON per thread)|
 | `blob_cache/`         | Cached Quip images/files (binary + `.meta` content-type)|
+| `msg_cache/`          | Cached Quip comments/messages (one JSON per thread)     |
 
 ## Troubleshooting
 
@@ -308,8 +320,8 @@ Quip folder `member_ids` are mapped to Outline collection permissions. All folde
 
 **Outline 400 on large documents** — some documents with many large images may exceed Outline's body size limit. The script uploads images as separate attachments to avoid this. If it still fails, try `--noAttachments`.
 
-**Resume after crash** — just re-run. The script reads `state.json` and skips already-imported documents. Or use `--retry` to re-import only failed ones.
+**Resume after crash** — just re-run. The script reads `state.json` and skips already-imported documents.
 
 **Wrong permissions** — use `--cleanup` and re-run, or `--noPermissions` to set them manually.
 
-**Verify results** — run `--verify` after migration to check for missing documents.
+**Verify results** — run `--status` after migration to check imported counts and any missing documents.
