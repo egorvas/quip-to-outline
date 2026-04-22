@@ -89,6 +89,7 @@ CONFIG_TEMPLATE = {
     "quip_api_token": "",
     "quip_concurrency": 5,
     "blob_concurrency": 8,
+    "outline_concurrency": 4,
     "_comment": "Database is optional. Remove this line and fill db fields to enable timestamp/author updates.",
     "db_host": "",
     "db_port": 5432,
@@ -105,6 +106,7 @@ DB_CONFIG = {}
 DB_ENABLED = False
 QUIP_CONCURRENCY = 5
 BLOB_CONCURRENCY = 8
+OUTLINE_CONCURRENCY = 4
 
 # Migration mode flags (set from CLI args)
 OPT_NO_COMMENTS = False
@@ -136,12 +138,13 @@ def load_config(require_outline=True):
 
 
 def setup_globals(cfg):
-    global OUTLINE_URL, OUTLINE_TOKEN, QUIP_TOKEN, DB_CONFIG, DB_ENABLED, QUIP_CONCURRENCY, BLOB_CONCURRENCY
+    global OUTLINE_URL, OUTLINE_TOKEN, QUIP_TOKEN, DB_CONFIG, DB_ENABLED, QUIP_CONCURRENCY, BLOB_CONCURRENCY, OUTLINE_CONCURRENCY
     OUTLINE_URL = cfg.get("outline_url", "").rstrip("/")
     OUTLINE_TOKEN = cfg.get("outline_api_token", "")
     QUIP_TOKEN = cfg["quip_api_token"]
     QUIP_CONCURRENCY = cfg.get("quip_concurrency", 5)
     BLOB_CONCURRENCY = cfg.get("blob_concurrency", 8)
+    OUTLINE_CONCURRENCY = cfg.get("outline_concurrency", 4)
 
     # DB is optional — enabled only if db_host is set and psycopg2 available
     if cfg.get("db_host"):
@@ -192,11 +195,15 @@ def new_state():
     }
 
 
+_save_state_file_lock = threading.Lock()
+
+
 def save_state(state):
     tmp = STATE_FILE + ".tmp"
-    with open(tmp, 'w') as f:
-        json.dump(state, f, indent=2, ensure_ascii=False)
-    os.replace(tmp, STATE_FILE)
+    with _save_state_file_lock:
+        with open(tmp, 'w') as f:
+            json.dump(state, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, STATE_FILE)
 
 
 def load_mapping():
@@ -836,6 +843,9 @@ class Progress:
 # Global progress instance, set in main()
 progress = None
 
+# Lock for thread-safe state updates during parallel import
+_state_lock = threading.Lock()
+
 
 # --- Process single thread ---
 
@@ -845,11 +855,12 @@ def process_thread(thread_id, collection_id, parent_doc_id, thread_data, author_
     thread_data must contain 'html' (fetched in Phase 2).
     Returns (outline_doc_id, comment_data_list) or None on error.
     """
-    if thread_id in state["imported_threads"]:
-        title = state["imported_threads"][thread_id].get("title", thread_id)
-        if progress:
-            progress.log_skipped(title)
-        return None
+    with _state_lock:
+        if thread_id in state["imported_threads"]:
+            title = state["imported_threads"][thread_id].get("title", thread_id)
+            if progress:
+                progress.log_skipped(title)
+            return None
 
     title = thread_data.get("title", thread_id)
     html = thread_data.get("html", "")
@@ -959,30 +970,51 @@ def process_thread(thread_id, collection_id, parent_doc_id, thread_data, author_
                             if ann_match:
                                 annotated_text = re.sub(r'<[^>]+>', '', ann_match.group(1)).strip()[:200]
 
-                        # Build ProseMirror content with optional quote
-                        pm_content = []
-                        if annotated_text:
+                        # Split long comments into chunks (Outline limit: 1000 chars)
+                        max_comment = 1000
+                        quote_overhead = len(f"> {annotated_text}") + 1 if annotated_text else 0
+                        first_chunk_limit = max_comment - quote_overhead if annotated_text else max_comment
+                        # If quote alone exceeds limit, drop it
+                        if first_chunk_limit < 50:
+                            annotated_text = ""
+                            first_chunk_limit = max_comment
+
+                        chunks = []
+                        text_remaining = msg_text
+                        limit = first_chunk_limit
+                        while text_remaining:
+                            chunks.append(text_remaining[:limit])
+                            text_remaining = text_remaining[limit:]
+                            limit = max_comment  # subsequent chunks have no quote
+
+                        for i, chunk in enumerate(chunks):
+                            pm_content = []
+                            if i == 0 and annotated_text:
+                                pm_content.append({
+                                    "type": "paragraph",
+                                    "content": [{"type": "text", "text": f"> {annotated_text}", "marks": [{"type": "em"}]}],
+                                })
+                            if len(chunks) > 1:
+                                chunk_text = f"[{i + 1}/{len(chunks)}] {chunk}"
+                            else:
+                                chunk_text = chunk
                             pm_content.append({
                                 "type": "paragraph",
-                                "content": [{"type": "text", "text": f"> {annotated_text}", "marks": [{"type": "em"}]}],
+                                "content": [{"type": "text", "text": chunk_text}],
                             })
-                        pm_content.append({
-                            "type": "paragraph",
-                            "content": [{"type": "text", "text": msg_text}],
-                        })
 
-                        try:
-                            cresult = outline_post("comments.create", {
-                                "documentId": doc_id,
-                                "data": {"type": "doc", "content": pm_content},
-                            })
-                            comment_data.append({
-                                "comment_id": cresult["data"]["id"],
-                                "created_usec": created_usec,
-                                "author_id": author_qid,
-                            })
-                        except Exception as e:
-                            print(f"      Comment error: {e}")
+                            try:
+                                cresult = outline_post("comments.create", {
+                                    "documentId": doc_id,
+                                    "data": {"type": "doc", "content": pm_content},
+                                })
+                                comment_data.append({
+                                    "comment_id": cresult["data"]["id"],
+                                    "created_usec": created_usec,
+                                    "author_id": author_qid,
+                                })
+                            except Exception as e:
+                                print(f"      Comment error: {e}")
             except Exception:
                 pass  # No messages
 
@@ -997,12 +1029,13 @@ def process_thread(thread_id, collection_id, parent_doc_id, thread_data, author_
         if progress:
             progress.log_imported(title, extra_str)
 
-        # Track in state
-        state["imported_threads"][thread_id] = {
-            "title": title,
-            "doc_id": doc_id,
-            "comments": comment_data,
-        }
+        # Track in state (thread-safe)
+        with _state_lock:
+            state["imported_threads"][thread_id] = {
+                "title": title,
+                "doc_id": doc_id,
+                "comments": comment_data,
+            }
 
         return doc_id, comment_data
 
@@ -1014,22 +1047,52 @@ def process_thread(thread_id, collection_id, parent_doc_id, thread_data, author_
 
 # --- Import folder tree ---
 
+def _save_state_periodic(state, counter):
+    """Save state every 5 imports (thread-safe)."""
+    with _state_lock:
+        if counter[0] % 5 == 0:
+            save_state(state)
+
+
 def import_folder(node, collection_id, parent_doc_id, thread_data_map, author_mapping, user_names, state, depth=0):
     """Recursively import a folder's threads and subfolders."""
     imported = 0
     errors = 0
 
-    # Import threads in this folder
-    for tid in node["thread_ids"]:
-        tdata = thread_data_map.get(tid, {})
-        result = process_thread(tid, collection_id, parent_doc_id, tdata, author_mapping, user_names, state)
-        if result:
-            imported += 1
-            # Save state after each doc for crash recovery
-            if imported % 5 == 0:
-                save_state(state)
-        elif result is None and tid not in state["imported_threads"]:
-            errors += 1
+    # Import threads in this folder (parallel)
+    thread_ids = node["thread_ids"]
+    if OUTLINE_CONCURRENCY > 1 and len(thread_ids) > 1:
+        counter = [0]
+        with ThreadPoolExecutor(max_workers=OUTLINE_CONCURRENCY) as pool:
+            futures = {
+                pool.submit(
+                    process_thread, tid, collection_id, parent_doc_id,
+                    thread_data_map.get(tid, {}), author_mapping, user_names, state,
+                ): tid
+                for tid in thread_ids
+            }
+            for future in as_completed(futures):
+                tid = futures[future]
+                try:
+                    result = future.result()
+                    if result:
+                        imported += 1
+                        counter[0] += 1
+                        _save_state_periodic(state, counter)
+                    elif result is None and tid not in state["imported_threads"]:
+                        errors += 1
+                except Exception:
+                    errors += 1
+    else:
+        for tid in thread_ids:
+            tdata = thread_data_map.get(tid, {})
+            result = process_thread(tid, collection_id, parent_doc_id, tdata, author_mapping, user_names, state)
+            if result:
+                imported += 1
+                if imported % 5 == 0:
+                    save_state(state)
+            elif result is None and tid not in state["imported_threads"]:
+                errors += 1
 
     # Import subfolders
     for fid, sub_node in node["subfolders"].items():
@@ -1433,11 +1496,28 @@ def main():
                 pass
 
         # Import top-level threads (directly in space, no parent folder)
-        for tid in space["thread_ids"]:
-            tdata = thread_data_map.get(tid, {})
-            result = process_thread(tid, coll_id, None, tdata, author_mapping, user_names, state)
-            if result:
-                total_imported += 1
+        top_tids = space["thread_ids"]
+        if OUTLINE_CONCURRENCY > 1 and len(top_tids) > 1:
+            with ThreadPoolExecutor(max_workers=OUTLINE_CONCURRENCY) as pool:
+                futures = {
+                    pool.submit(
+                        process_thread, tid, coll_id, None,
+                        thread_data_map.get(tid, {}), author_mapping, user_names, state,
+                    ): tid
+                    for tid in top_tids
+                }
+                for future in as_completed(futures):
+                    try:
+                        if future.result():
+                            total_imported += 1
+                    except Exception:
+                        pass
+        else:
+            for tid in top_tids:
+                tdata = thread_data_map.get(tid, {})
+                result = process_thread(tid, coll_id, None, tdata, author_mapping, user_names, state)
+                if result:
+                    total_imported += 1
 
         # Import subfolders
         for sub_fid, sub_node in space["subfolders"].items():
