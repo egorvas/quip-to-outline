@@ -28,6 +28,7 @@ import mimetypes
 import os
 import re
 import sys
+import threading
 import time
 import urllib.request
 import urllib.error
@@ -227,8 +228,6 @@ def save_mapping(mapping):
 #   X-Company-Ratelimit-Limit: 600 per-company, per minute
 #   X-Company-Ratelimit-Remaining: N
 #   Retry-After: seconds           seconds until reset
-
-import threading
 
 class QuipRateLimiter:
     """Rate limiter driven by actual Quip API response headers."""
