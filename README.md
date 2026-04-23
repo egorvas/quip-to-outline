@@ -70,7 +70,8 @@ quip-to-outline --config ~/migration/config.json --init   # custom path
   "outline_api_token": "ol_api_...",
   "quip_api_token": "YOUR_QUIP_TOKEN",
   "quip_concurrency": 5,
-  "blob_concurrency": 8
+  "blob_concurrency": 8,
+  "outline_concurrency": 4
 }
 ```
 
@@ -83,6 +84,7 @@ quip-to-outline --config ~/migration/config.json --init   # custom path
   "quip_api_token": "YOUR_QUIP_TOKEN",
   "quip_concurrency": 5,
   "blob_concurrency": 8,
+  "outline_concurrency": 4,
   "db_host": "localhost",
   "db_port": 5432,
   "db_user": "outline",
@@ -100,6 +102,7 @@ quip-to-outline --config ~/migration/config.json --init   # custom path
 | `quip_api_token`    | Yes      | Quip API token                                               |
 | `quip_concurrency`  | No       | Max parallel Quip API requests (default: 5)                  |
 | `blob_concurrency`  | No       | Max parallel image/file downloads (default: 8)               |
+| `outline_concurrency` | No     | Max parallel document imports to Outline (default: 4)        |
 | `db_host`           | No       | PostgreSQL host — **if set, enables DB features**            |
 | `db_port`           | No       | PostgreSQL port (default: 5432)                              |
 | `db_user`           | No       | PostgreSQL user (default: outline)                           |

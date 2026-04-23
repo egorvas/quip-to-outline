@@ -1950,6 +1950,12 @@ def cmd_update_db():
     # Load user names from state cache
     user_names = state.get("cache", {}).get("user_names") or {}
 
+    # Attach author names to thread meta (html_cache stores author_id but not author_name)
+    for meta in thread_meta_map.values():
+        aid = meta.get("author_id")
+        if aid and aid in user_names:
+            meta["author_name"] = user_names[aid]
+
     print(f"Updating DB for {len(imported)} documents (meta available for {len(thread_meta_map)})")
     update_db(state, thread_meta_map, user_names, author_mapping)
     save_state(state)
