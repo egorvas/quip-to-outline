@@ -23,6 +23,7 @@ Requirements:
 """
 
 import base64
+import html as html_mod
 import json
 import mimetypes
 import os
@@ -846,6 +847,55 @@ progress = None
 _state_lock = threading.Lock()
 
 
+# --- HTML preprocessing helpers ---
+
+_PRE_BLOCK_RE = re.compile(r'<pre\b[^>]*>(.*?)</pre\s*>', re.IGNORECASE | re.DOTALL)
+
+
+def normalize_pre_blocks(html):
+    """Replace each <pre>...</pre> with <pre class="code-block">{plain text}</pre>.
+
+    Quip's prettyprint <pre> blocks tokenize content into many <code><span>...
+    </span></code> children with <br/> separators and bare text mixed in.
+    Outline's HTML→Markdown importer treats <pre> with <code> children as a
+    GFM-style fenced code block and extracts ONLY the <code> content, silently
+    dropping the bare-text lines between them (e.g. lines starting with '#').
+    Flatten the inner content to a single clean text block so the importer
+    sees a plain code block.
+    """
+    def replace(m):
+        inner = m.group(1)
+        # <br/> variants -> newline
+        text = re.sub(r'<br\s*/?>', '\n', inner, flags=re.IGNORECASE)
+        # Strip every remaining tag, keep its text content
+        text = re.sub(r'<[^>]+>', '', text)
+        # Decode entities (&gt; &amp; &nbsp; &#xNN; ...)
+        text = html_mod.unescape(text)
+        # Replace NBSP with a regular space so code lines line up
+        text = text.replace('\xa0', ' ')
+        # Re-escape for safe HTML emission
+        text = (text.replace('&', '&amp;')
+                    .replace('<', '&lt;')
+                    .replace('>', '&gt;'))
+        return f'<pre class="code-block">{text}</pre>'
+    return _PRE_BLOCK_RE.sub(replace, html)
+
+
+# Quip blob URLs in exported HTML look like src='/blob/<thread_id>/<blob_id>'
+# or href='/blob/<thread_id>/<blob_id>' — a relative path inside an attribute
+# value. The lookbehind requires a quote so we don't accidentally pick up
+# absolute github URLs like https://github.com/owner/repo/blob/branch/file.ext
+# (where '/blob/' is in the middle of the path). Both ID parts are restricted
+# to URL-safe identifier chars (alnum + '-' '_'), which Quip uses and github
+# branch/path names typically don't (they have '.' or '/').
+_QUIP_BLOB_RE = re.compile(r'''(?<=['"])/blob/([A-Za-z0-9_-]+)/([A-Za-z0-9_-]+)''')
+
+
+def find_quip_blob_refs(html):
+    """Return deduplicated [(thread_id, blob_id), ...] of Quip blob references."""
+    return list(dict.fromkeys(_QUIP_BLOB_RE.findall(html)))
+
+
 # --- Process single thread ---
 
 def process_thread(thread_id, collection_id, parent_doc_id, thread_data, author_mapping, user_names, state):
@@ -871,7 +921,7 @@ def process_thread(thread_id, collection_id, parent_doc_id, thread_data, author_
 
     try:
         # 1. Find blob references (deduplicate)
-        blob_refs = list(dict.fromkeys(re.findall(r'/blob/([^/]+)/([^"\'?\s<>]+)', html)))
+        blob_refs = find_quip_blob_refs(html)
         if blob_refs and not OPT_NO_ATTACHMENTS:
             # 2. Download blobs in parallel from Quip
             blobs = {}
@@ -889,24 +939,35 @@ def process_thread(thread_id, collection_id, parent_doc_id, thread_data, author_
                     except Exception:
                         pass
 
-            # 3. Upload as Outline attachments and replace URLs
+            # 3. Embed blobs in HTML so Outline's documents.import creates
+            #    proper document-linked attachments itself.
+            #
+            #    Why not attachments.create + URL substitution?
+            #    Empirically, when we send <img src='/api/attachments.redirect?
+            #    id=<our-id>'> via documents.import, Outline assigns fresh IDs
+            #    but never creates the underlying attachment records — the
+            #    rendered doc ends up with 404'd image URLs. Passing the bytes
+            #    inline as a data: URI sidesteps that: the importer decodes,
+            #    uploads, and links the attachment to the new doc itself.
             for (tid, bid), (blob_bytes, content_type) in blobs.items():
-                ext = mimetypes.guess_extension(content_type) or ".bin"
-                filename = f"{bid[:12]}{ext}"
-                att_url = outline_upload_attachment(blob_bytes, filename, content_type)
-                if att_url:
-                    html = html.replace(f"/blob/{tid}/{bid}", att_url)
+                if len(blob_bytes) < 5_000_000:
+                    b64 = base64.b64encode(blob_bytes).decode()
+                    html = html.replace(
+                        f"/blob/{tid}/{bid}",
+                        f"data:{content_type};base64,{b64}",
+                    )
                 else:
-                    # Fallback: small blobs inline, large ones skip
-                    if len(blob_bytes) < 500_000:
-                        b64 = base64.b64encode(blob_bytes).decode()
-                        html = html.replace(f"/blob/{tid}/{bid}", f"data:{content_type};base64,{b64}")
-                    else:
-                        html = html.replace(f"/blob/{tid}/{bid}", "#")
+                    # Too big for inline; try the (less reliable) attachment
+                    # path as a last resort, else drop the reference.
+                    ext = mimetypes.guess_extension(content_type) or ".bin"
+                    filename = f"{bid[:12]}{ext}"
+                    att_url = outline_upload_attachment(blob_bytes, filename, content_type)
+                    html = html.replace(f"/blob/{tid}/{bid}", att_url or "#")
 
         # 4. Fix HTML tags not supported by Outline's importer
-        #    <pre> code blocks: Outline needs class="code-block"
-        html = re.sub(r"<pre[^>]*>", '<pre class="code-block">', html)
+        #    Flatten Quip prettyprint <pre> blocks (nested <code>/<br/> get lost
+        #    by Outline's importer; emit a single clean code block).
+        html = normalize_pre_blocks(html)
         #    <tt> (monospace) -> <code> (inline code)
         html = html.replace("<tt>", "<code>").replace("</tt>", "</code>")
         #    <h5>/<h6> -> <h4> (Outline only supports h1-h4)
@@ -1738,7 +1799,7 @@ def cmd_prefetch():
 
         # Blobs
         if html and not OPT_NO_ATTACHMENTS:
-            blob_refs = list(dict.fromkeys(re.findall(r'/blob/([^/]+)/([^"\'?\s<>]+)', html)))
+            blob_refs = find_quip_blob_refs(html)
             if blob_refs:
                 with ThreadPoolExecutor(max_workers=BLOB_CONCURRENCY) as pool:
                     futures = {
